@@ -20,15 +20,15 @@ GREEN, DIM_GREEN, AMBER, RED = "#00ff41", "#008f11", "#ffb000", "#ff5555"
 st.markdown(
     f"""
     <style>
-    html, body, [class*="st-"], button, input, textarea, select {{
-        font-family: "IBM Plex Mono", "Cascadia Mono", Consolas, "Courier New", monospace !important;
-    }}
     h1, h2, h3 {{ text-transform: uppercase; letter-spacing: 0.04em; text-shadow: 0 0 6px {DIM_GREEN}; }}
     h1::before {{ content: "> "; }}
     [data-testid="stSidebar"] {{ border-right: 1px solid {DIM_GREEN}; }}
     [data-testid="stMetric"], [data-testid="stExpander"] details, [data-testid="stAlert"] {{
         border: 1px solid {DIM_GREEN}; border-radius: 0;
     }}
+    [data-testid="stAlertContainer"] {{ background: #031403 !important; }}
+    [data-testid="stAlert"] p {{ color: {GREEN} !important; }}
+    [data-testid="stSidebar"] > div {{ overflow-x: hidden; }}
     [data-testid="stMetric"] {{ padding: 0.5rem 0.75rem; }}
     [data-testid="stMetricValue"] {{ text-shadow: 0 0 6px {DIM_GREEN}; }}
     button, [data-baseweb="select"] > div, [data-baseweb="input"] {{ border-radius: 0 !important; }}
