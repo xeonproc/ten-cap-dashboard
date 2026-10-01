@@ -6,32 +6,54 @@ Streamlit app (running in the browser via [stlite](https://github.com/whitphx/st
 
 | File | Role |
 | --- | --- |
+| `fetch_data.py` | Slow step: screens the market and downloads raw SEC figures to `cache/raw.jsonl.gz` |
+| `build_data.py` | Fast step: computes everything from the cache and writes `dist/data.json` |
+| `sec_tags.py` | The list of SEC fields that are downloaded and may be read |
+| `sec_data.py` | SEC EDGAR client and extractors (EPS, cash flow, balance sheet, split detection) |
 | `market_data.py` | Bulk price / market-cap snapshot of all NYSE, NASDAQ and AMEX listings |
-| `sec_data.py` | SEC EDGAR client: registrant universe, bulk EPS frames, per-company facts |
 | `valuation.py` | Formulas, shared by the build and the browser app |
-| `build_data.py` | CI entry point, writes `dist/data.json` |
 | `app.py` / `index.html` | Streamlit dashboard and its stlite host page |
-| `.github/workflows/deploy.yml` | Builds on push, on weekdays, and on demand; deploys to Pages |
+| `.github/workflows/deploy.yml` | Builds and deploys to Pages |
+
+## How builds work
+
+- **Daily (weekdays 22:30 UTC):** downloads fresh SEC data and prices (about 15 minutes) and
+  saves the raw figures in the GitHub Actions cache.
+- **On every push:** recomputes from the cached raw figures and redeploys (about a minute).
+- A fresh download also happens automatically when `fetch_data.py`, `market_data.py` or
+  `sec_tags.py` change, since those decide what is downloaded.
+- From the Actions tab, "Run workflow" offers a forced refresh and a small test build
+  (the N largest candidates only).
 
 ## Screening pipeline
 
-1. **Phase 1 (bulk, a few requests):** every listed common stock is matched to its SEC
+1. **Pre-filter (bulk, a few requests):** every listed common stock is matched to its SEC
    registration and kept only if it is on NYSE/NASDAQ/AMEX, has a positive price, a market
    cap above $100M, and positive EPS in its latest fiscal year.
-2. **Phase 2 (one SEC request per candidate):** full company facts are pulled; candidates
-   need positive trailing-twelve-month EPS and at least 3 fiscal years of EPS history.
+2. **Analysis (one SEC request per candidate):** candidates need positive trailing-twelve-month
+   EPS and at least 3 fiscal years of history. Companies with obviously broken filing data
+   are dropped (see "candidates dropped" on the dashboard).
 3. **Dashboard:** intrinsic value and discount are recomputed in the browser from the
-   sliders, then filtered by target discount and sector.
+   sidebar settings, then filtered.
 
-Thresholds are constants at the top of `build_data.py`. The counts at each step are
-written to `data.json` and shown in the dashboard sidebar.
+## Valuation
 
-## Formulas
+- **Owner earnings** = the lower of average EPS and average free cash flow per share
+  (switchable to either alone), averaged over 10 or 5 fiscal years. Free cash flow is
+  operating cash flow minus all capital spending. Financial companies always use EPS.
+- **Intrinsic value** = owner earnings × (1 + g) / (r − g), defaults r = 10%, g = 3%.
+  With g = 0 this is a strict 10-cap: 10 × owner earnings.
+- **Discount %** = (1 − price / intrinsic value) × 100.
+- **TBV/share** = (assets − liabilities − goodwill − intangibles) / diluted shares.
+- Per-share history is adjusted for stock splits, detected from restated figures in later filings.
 
-- Normalized EPS = average of the last 10 fiscal years of diluted EPS (5-year average also shown; switchable in the sidebar), adjusted for stock splits detected from restated figures in later filings
-- Intrinsic value = Normalized EPS × (1 + g) / (r − g), defaults r = 10%, g = 3%
-- TBV/share = (Assets − Liabilities − Goodwill − Intangibles) / diluted shares
-- Discount % = (1 − Price / Intrinsic value) × 100
+## Filters
+
+- **Stability:** years of history, loss years, EPS volatility (standard deviation ÷ mean),
+  current EPS relative to the long-run average, capex as a share of operating cash flow,
+  and revenue growth.
+- **Quality (Buffett screen):** P/E, PEG, 5-year EPS growth, return on equity, current
+  ratio, debt/equity, operating margin. Growth and PEG use historical growth, not forecasts.
 
 ## Deploy
 
@@ -44,17 +66,19 @@ written to `data.json` and shown in the dashboard sidebar.
 ```bash
 python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
+python fetch_data.py   # slow; CANDIDATE_LIMIT=100 for a quick sample
 python build_data.py
 streamlit run app.py
 ```
 
 ## Known limitations
 
-- EPS older than the comparative periods in recent 10-Ks is not split-adjusted, so a
-  recent stock split can distort the 5-year average.
+- A stock split is only detected once the company's next quarterly or annual filing restates
+  earlier periods, so a split in the last few months may not be adjusted yet.
+- Maintenance capex is not disclosed, so free cash flow subtracts all capex. This understates
+  owner earnings for companies investing heavily in growth.
 - Companies filing under IFRS (most foreign issuers) have no `us-gaap` facts and are skipped.
-- Banks and insurers often lack a tagged total for liabilities; it is derived from
-  total liabilities and equity minus equity.
+- Companies tag debt and revenue inconsistently; debt/equity and operating margin are approximate.
 - Prices and market caps come from Nasdaq's unofficial screener endpoint; if it fails the
   build fails and the previous deployment stays up.
 - Companies with several share classes that report EPS per one class (e.g. Berkshire) are dropped.
