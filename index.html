@@ -10,7 +10,7 @@
 
       /* Falling-character backdrop, behind the app */
       #rain { position: fixed; inset: 0; z-index: 0; opacity: 0.22; pointer-events: none; }
-      #root { position: relative; z-index: 1; }
+      #root { position: fixed; inset: 0; z-index: 1; }
       .stApp, [data-testid="stHeader"] { background: transparent !important; }
       [data-testid="stSidebar"] { background: rgba(3, 20, 3, 0.9) !important; }
 
@@ -140,7 +140,7 @@
       }, 45);
       const started = Date.now();
       const ready = setInterval(() => {
-        const rendered = document.querySelector(".stApp h1");
+        const rendered = document.querySelector('.stApp [data-testid="stSlider"]');
         if (rendered || Date.now() - started > 90000) {
           clearInterval(ready);
           clearInterval(typer);
