@@ -68,6 +68,9 @@ jobs:
           path: cache
           key: sec-raw-${{ hashFiles('fetch_data.py', 'market_data.py', 'sec_tags.py') }}-${{ github.run_id }}
 
+      - name: Check the dashboard code compiles
+        run: python -m py_compile app.py valuation.py
+
       - name: Compute valuations
         run: python build_data.py
 
