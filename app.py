@@ -52,9 +52,66 @@ if data is None:
     st.error("data.json not found. Run `python fetch_data.py` then `python build_data.py`.")
     st.stop()
 
-defaults = data.get("defaults", {})
+built = data.get("defaults", {})
 
 # ---------------------------------------------------------------- sidebar
+QUALITY_FILTERS = {
+    "pe": "P/E",
+    "peg": "PEG",
+    "growth": "EPS growth",
+    "roe": "Return on equity",
+    "current": "Current ratio",
+    "de": "Debt / equity",
+    "margin": "Operating margin",
+}
+
+# Starting values for every control, per market. Foreign figures are annual-only and
+# distorted by exchange rates, so that preset is looser and leans on the measures that
+# survive currency conversion (ROE, debt/equity, P/E).
+US_DEFAULTS = {
+    "r_pct": built.get("hurdle_rate", 0.10) * 100,
+    "g_pct": built.get("growth_rate", 0.03) * 100,
+    "target": 30,
+    "basis": "lower",
+    "window": 10,
+    "sectors": [],
+    "use_stability": True,
+    "min_years": 10,
+    "max_loss_years": 1,
+    "max_volatility": 0.75,
+    "max_peak": 2.5,
+    "max_capex": 60.0,
+    "min_revenue_growth": 0.0,
+    "use_quality": True,
+    "quality_active": list(QUALITY_FILTERS),
+    "max_pe": 25.0,
+    "max_peg": 2.0,
+    "min_growth": 5.0,
+    "min_roe": 15.0,
+    "min_current": 1.5,
+    "max_de": 0.5,
+    "min_margin": 15.0,
+    "data_checks": True,
+}
+DEFAULTS = {
+    "us": US_DEFAULTS,
+    "foreign": {
+        **US_DEFAULTS,
+        "min_years": 5,
+        "max_loss_years": 0,
+        "max_volatility": 1.0,
+        "quality_active": ["pe", "roe", "de"],
+        "max_pe": 15.0,
+        "max_de": 1.0,
+    },
+}
+
+
+def apply_defaults(market):
+    for key, value in DEFAULTS[market].items():
+        st.session_state[key] = value
+
+
 MODES = {"us": "US-style reporters", "foreign": "Foreign reporters (US-listed)"}
 mode = st.sidebar.radio(
     "Market",
@@ -64,27 +121,38 @@ mode = st.sidebar.radio(
     "US accounting rules, US dollars, quarterly filings (this includes some companies based "
     "abroad, such as lululemon or Accenture). Foreign: annual reports only, often in another "
     "currency or under international rules, usually listed as depositary shares. Foreign "
-    "figures are converted to dollars and are less precise; see the Formulas tab.",
+    "figures are converted to dollars and are less precise; see the Formulas tab. "
+    "Switching market loads that market's default settings.",
 )
 foreign_mode = mode == "foreign"
+if st.session_state.get("active_market") != mode:
+    # First load, or the market was switched: start from that market's defaults.
+    apply_defaults(mode)
+    st.session_state["active_market"] = mode
+st.sidebar.button(
+    "Reset to defaults",
+    on_click=apply_defaults,
+    args=(mode,),
+    help=f"Put every setting below back to the starting values for {MODES[mode]}.",
+    use_container_width=True,
+)
+
 companies = [c for c in data["companies"] if bool(c.get("foreign")) == foreign_mode]
 if not companies:
     st.warning("No companies are available for this market in the current data.")
     st.stop()
 
 st.sidebar.header("Valuation")
-r = st.sidebar.slider(
-    "Hurdle rate (r) %", 5.0, 20.0, defaults.get("hurdle_rate", 0.10) * 100, 0.5
-) / 100
+r = st.sidebar.slider("Hurdle rate (r) %", 5.0, 20.0, step=0.5, key="r_pct") / 100
 g = st.sidebar.slider(
     "Growth rate (g) %",
     0.0,
     8.0,
-    defaults.get("growth_rate", 0.03) * 100,
-    0.25,
+    step=0.25,
+    key="g_pct",
     help="Set to 0 for a strict 10-cap: at r = 10% the price ceiling is 10 × owner earnings.",
 ) / 100
-target = st.sidebar.slider("Target discount (margin of safety) %", 0, 90, 30, 5)
+target = st.sidebar.slider("Target discount (margin of safety) %", 0, 90, step=5, key="target")
 BASES = {
     "lower": "Lower of EPS and free cash flow",
     "eps": "EPS only",
@@ -94,6 +162,7 @@ basis = st.sidebar.radio(
     "Owner earnings measured by",
     list(BASES),
     format_func=BASES.get,
+    key="basis",
     help="Free cash flow is operating cash flow minus all capital spending, per share. "
     "Taking the lower of the two avoids paying for accounting earnings that never become "
     "cash. Financial companies always use EPS.",
@@ -103,52 +172,77 @@ window = st.sidebar.radio(
     [10, 5],
     format_func=lambda n: f"{n} years",
     horizontal=True,
+    key="window",
     help="10 years spans a full business cycle, which matters for cyclical companies.",
 )
 sectors = sorted({c.get("sector") for c in companies if c.get("sector")})
-chosen_sectors = st.sidebar.multiselect("Sectors", sectors, placeholder="All sectors")
+st.session_state["sectors"] = [s for s in st.session_state.get("sectors", []) if s in sectors]
+chosen_sectors = st.sidebar.multiselect("Sectors", sectors, placeholder="All sectors", key="sectors")
 
 st.sidebar.header("Stability filters")
-use_stability = st.sidebar.toggle("Screen out boom-bust businesses", value=True)
+use_stability = st.sidebar.toggle("Screen out boom-bust businesses", key="use_stability")
 with st.sidebar.expander("Thresholds", expanded=False):
-    min_years = st.number_input("Years of history, at least", value=10, min_value=3, max_value=10, step=1)
-    max_loss_years = st.number_input("Loss years, at most", value=1, min_value=0, step=1)
+    min_years = st.number_input("Years of history, at least", min_value=3, max_value=10, step=1, key="min_years")
+    max_loss_years = st.number_input("Loss years, at most", min_value=0, step=1, key="max_loss_years")
     max_volatility = st.number_input(
         "EPS volatility under",
-        value=0.75,
         step=0.05,
+        key="max_volatility",
         help="Standard deviation of annual EPS divided by its average. Steady earners are "
-        "below about 0.5; boom-bust businesses are well above 1.",
+        "below about 0.5; boom-bust businesses are well above 1. Exchange-rate swings add "
+        "to this for foreign companies.",
     )
     max_peak = st.number_input(
         "Current EPS ÷ long-run average, under",
-        value=2.5,
         step=0.25,
+        key="max_peak",
         help="A high value means today's earnings are far above the company's own history: "
         "either strong growth or a cyclical peak.",
     )
     max_capex = st.number_input(
         "Capex as % of operating cash flow, under",
-        value=60.0,
         step=5.0,
+        key="max_capex",
         help="Capital-heavy businesses (shipping, mining, energy) must keep reinvesting just "
         "to stand still. Companies that do not report this pass.",
     )
-    min_revenue_growth = st.number_input("Revenue growth per year, over %", value=0.0, step=1.0)
+    min_revenue_growth = st.number_input("Revenue growth per year, over %", step=1.0, key="min_revenue_growth")
 
 st.sidebar.header("Quality filters")
-use_quality = st.sidebar.toggle("Apply Buffett screen", value=True)
+use_quality = st.sidebar.toggle("Apply quality screen", key="use_quality")
 with st.sidebar.expander("Thresholds", expanded=False):
-    max_pe = st.number_input("P/E under", value=25.0, step=1.0)
-    max_peg = st.number_input("PEG under (past EPS growth)", value=2.0, step=0.25)
-    min_growth = st.number_input("EPS growth, past 5 years, over %", value=5.0, step=1.0)
-    min_roe = st.number_input("Return on equity over %", value=15.0, step=1.0)
-    min_current = st.number_input("Current ratio over", value=1.5, step=0.1)
-    max_de = st.number_input("Debt / equity under", value=0.5, step=0.1)
-    min_margin = st.number_input("Operating margin over %", value=15.0, step=1.0)
+    quality_active = st.multiselect(
+        "Filters in use",
+        list(QUALITY_FILTERS),
+        format_func=QUALITY_FILTERS.get,
+        key="quality_active",
+        help="Remove a filter to ignore that measure entirely. The US default is the full "
+        "Buffett screen; the foreign default keeps the three measures that survive currency "
+        "conversion.",
+    )
+    max_pe = st.number_input("P/E under", step=1.0, key="max_pe")
+    max_peg = st.number_input("PEG under (past EPS growth)", step=0.25, key="max_peg")
+    min_growth = st.number_input("EPS growth, past 5 years, over %", step=1.0, key="min_growth")
+    min_roe = st.number_input("Return on equity over %", step=1.0, key="min_roe")
+    min_current = st.number_input("Current ratio over", step=0.1, key="min_current")
+    max_de = st.number_input("Debt / equity under", step=0.1, key="max_de")
+    min_margin = st.number_input("Operating margin over %", step=1.0, key="min_margin")
     st.caption(
         "Growth and PEG use historical EPS growth, not analyst forecasts. "
-        "A company missing a metric fails that filter."
+        "A company missing a metric fails that filter while it is in use."
+    )
+
+data_checks = False
+if foreign_mode:
+    st.sidebar.header("Data checks")
+    data_checks = st.sidebar.toggle(
+        "Hide unreliable rows",
+        key="data_checks",
+        help="Hides foreign companies whose figures are likely wrong: the filings imply a "
+        "share ratio that is not a whole number (the market cap may not cover the whole "
+        "company), the latest annual report is more than about 18 months old, or the company "
+        "reports under hyperinflation accounting (Argentina), which the currency conversion "
+        "does not handle.",
     )
 st.sidebar.caption(f"SEC data downloaded {data.get('generated_at', 'unknown')}.")
 
@@ -183,6 +277,25 @@ def averages(company, years):
     return (
         valuation.average([h["eps"] for h in history]),
         valuation.average([h["fcf_ps"] for h in history], MIN_FCF_YEARS),
+    )
+
+
+HYPERINFLATION_COUNTRIES = {"Argentina"}
+STALE_BEFORE = (pd.Timestamp(data.get("generated_at", pd.Timestamp.now().isoformat())[:10]) - pd.Timedelta(days=550)).strftime("%Y-%m-%d")
+
+
+def looks_reliable(company):
+    """False for foreign rows whose figures are probably wrong (see the Data checks help)."""
+    if not company.get("foreign"):
+        return True
+    ratio = company.get("shares_per_listed_share")
+    if not ratio:
+        return False
+    multiple = ratio if ratio >= 1 else 1 / ratio
+    return (
+        abs(multiple - round(multiple)) / round(multiple) <= 0.08
+        and (company.get("fiscal_year_end") or "") >= STALE_BEFORE
+        and company.get("country") not in HYPERINFLATION_COUNTRIES
     )
 
 
@@ -232,6 +345,8 @@ def revalue(company):
 
 table = pd.DataFrame([revalue(c) for c in companies])
 total_loaded = len(table)
+if data_checks:
+    table = table[[looks_reliable(c) for c in companies]]
 if chosen_sectors:
     table = table[table["Sector"].isin(chosen_sectors)]
 # Comparisons against NaN are False, so a company missing a metric fails that filter.
@@ -245,15 +360,17 @@ if use_stability:
         & (table["Rev Growth %"] > min_revenue_growth)
     ]
 if use_quality:
-    table = table[
-        (table["P/E"] < max_pe)
-        & (table["PEG"] < max_peg)
-        & (table["EPS Growth %"] > min_growth)
-        & (table["ROE %"] > min_roe)
-        & (table["Current Ratio"] > min_current)
-        & (table["Debt/Equity"] < max_de)
-        & (table["Op Margin %"] > min_margin)
-    ]
+    quality_tests = {
+        "pe": table["P/E"] < max_pe,
+        "peg": table["PEG"] < max_peg,
+        "growth": table["EPS Growth %"] > min_growth,
+        "roe": table["ROE %"] > min_roe,
+        "current": table["Current Ratio"] > min_current,
+        "de": table["Debt/Equity"] < max_de,
+        "margin": table["Op Margin %"] > min_margin,
+    }
+    for name in quality_active:
+        table = table[quality_tests[name].reindex(table.index)]
 
 st.title("10-Cap Value Investing Dashboard")
 st.caption(
