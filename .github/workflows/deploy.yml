@@ -1,5 +1,10 @@
 name: Build data and deploy to GitHub Pages
 
+# Two speeds:
+#   - Once a day (and whenever the list of fetched fields changes) the raw SEC data is
+#     downloaded and cached. That takes about 15 minutes.
+#   - Every other build recomputes from the cached raw data in seconds.
+
 on:
   push:
     branches: [main]
@@ -7,8 +12,12 @@ on:
     - cron: "30 22 * * 1-5" # weekdays, after the US market close
   workflow_dispatch:
     inputs:
+      refresh:
+        description: "Download fresh SEC data instead of using the cache"
+        type: boolean
+        default: false
       candidate_limit:
-        description: "Only analyse the N largest candidates (blank = all)"
+        description: "Test build: download only the N largest candidates (not cached)"
         required: false
 
 permissions:
@@ -30,13 +39,38 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install requests
-      - name: Build data.json
+
+      - name: Restore raw SEC data
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: cache
+          # The hash covers everything that decides what gets downloaded.
+          key: sec-raw-${{ hashFiles('fetch_data.py', 'market_data.py', 'sec_tags.py') }}-${{ github.run_id }}
+          restore-keys: sec-raw-${{ hashFiles('fetch_data.py', 'market_data.py', 'sec_tags.py') }}-
+
+      - name: Download SEC data
+        id: fetch
+        if: >-
+          github.event_name == 'schedule' || inputs.refresh == true ||
+          inputs.candidate_limit != '' || steps.cache.outputs.cache-matched-key == ''
         env:
           # Set a repository variable SEC_USER_AGENT ("Your Name you@example.com") to
           # identify yourself to the SEC; otherwise the default in sec_data.py is used.
           SEC_USER_AGENT: ${{ vars.SEC_USER_AGENT || 'FinancialApp admin@myproject.com' }}
           CANDIDATE_LIMIT: ${{ inputs.candidate_limit }}
+        run: python fetch_data.py
+
+      - name: Save raw SEC data
+        if: steps.fetch.outcome == 'success' && inputs.candidate_limit == ''
+        uses: actions/cache/save@v4
+        with:
+          path: cache
+          key: sec-raw-${{ hashFiles('fetch_data.py', 'market_data.py', 'sec_tags.py') }}-${{ github.run_id }}
+
+      - name: Compute valuations
         run: python build_data.py
+
       - name: Assemble static site
         run: cp index.html app.py valuation.py dist/
       - uses: actions/configure-pages@v5

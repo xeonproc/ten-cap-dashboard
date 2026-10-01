@@ -6,6 +6,17 @@ from datetime import date, timedelta
 
 import requests
 
+from sec_tags import (
+    CAPEX_TAGS,
+    EPS_TAGS,
+    KEEP_TAGS,
+    NET_INCOME_TAGS,
+    OPERATING_CASH_FLOW_TAGS,
+    OPERATING_INCOME_TAGS,
+    REVENUE_TAGS,
+    SHARES_TAG,
+)
+
 # SEC requires a descriptive User-Agent with contact info. Override via env in CI.
 USER_AGENT = os.environ.get("SEC_USER_AGENT", "FinancialApp admin@myproject.com")
 HEADERS = {"User-Agent": USER_AGENT, "Accept-Encoding": "gzip, deflate"}
@@ -15,10 +26,7 @@ UNIVERSE_URL = "https://www.sec.gov/files/company_tickers_exchange.json"
 FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
 FRAME_URL = "https://data.sec.gov/api/xbrl/frames/us-gaap/{tag}/USD-per-shares/CY{year}.json"
 
-# Diluted is preferred; a minority of filers only tag basic EPS.
-EPS_TAGS = ("EarningsPerShareDiluted", "EarningsPerShareBasic")
 EPS_UNIT = "USD/shares"
-SHARES_TAG = "WeightedAverageNumberOfDilutedSharesOutstanding"
 
 # SEC fair-access limit is 10 requests/second; stay under it.
 REQUEST_INTERVAL = 0.12
@@ -77,6 +85,8 @@ def fetch_company_facts(cik):
 
 
 def _facts(facts, tag, unit):
+    if tag not in KEEP_TAGS:
+        raise KeyError(f"{tag} is not listed in sec_tags.py, so it is not in the raw-data cache")
     return facts.get("facts", {}).get("us-gaap", {}).get(tag, {}).get("units", {}).get(unit, [])
 
 
@@ -173,16 +183,17 @@ def detect_splits(facts, tag):
     return sorted((after, factor) for _, after, factor, _ in events)
 
 
-def _split_adjusted(row, splits):
-    """A per-share value restated to today's share count."""
+def _split_adjusted(row, splits, share_count=False):
+    """A per-share value (or, with share_count, a number of shares) restated to today's
+    share count."""
     value = row["val"]
     for first_post_split_filing, factor in splits:
         if row.get("filed", "") < first_post_split_filing:
-            value /= factor
+            value = value * factor if share_count else value / factor
     return value
 
 
-def annual_series(facts, tag, unit, years=5, splits=()):
+def annual_series(facts, tag, unit, years=5, splits=(), share_count=False):
     """Last `years` full-fiscal-year values of a duration fact, oldest first."""
     annual = [
         row
@@ -193,7 +204,11 @@ def annual_series(facts, tag, unit, years=5, splits=()):
     best = _latest_filed_per_end(annual)
     ends = sorted(best)[-years:]
     return [
-        {"fiscal_year": int(end[:4]), "end": end, "value": _split_adjusted(best[end], splits)}
+        {
+            "fiscal_year": int(end[:4]),
+            "end": end,
+            "value": _split_adjusted(best[end], splits, share_count),
+        }
         for end in ends
     ]
 
@@ -258,12 +273,50 @@ def ttm_eps(facts, tag, splits=()):
     return ttm_value(facts, tag, EPS_UNIT, splits)
 
 
-REVENUE_TAGS = (
-    "Revenues",
-    "RevenueFromContractWithCustomerExcludingAssessedTax",
-    "RevenueFromContractWithCustomerIncludingAssessedTax",
-    "SalesRevenueNet",
-)
+def annual_by_end(facts, tags, years=10):
+    """{fiscal_year_end: value} in USD, taking each year from the first tag that reports it
+    (companies switch between equivalent tags over time)."""
+    merged = {}
+    for tag in tags:
+        for row in annual_series(facts, tag, "USD", years + 2):
+            merged.setdefault(row["end"], row["value"])
+    return merged
+
+
+def annual_history(facts, tag, splits, years=10):
+    """Per-fiscal-year EPS, free cash flow per share, revenue, operating cash flow and capex.
+
+    Free cash flow is operating cash flow minus all capital spending (maintenance capex is
+    not disclosed separately, so this is the conservative reading of owner earnings).
+    """
+    cash_flow = annual_by_end(facts, OPERATING_CASH_FLOW_TAGS, years)
+    capex = annual_by_end(facts, CAPEX_TAGS, years)
+    revenue = annual_by_end(facts, REVENUE_TAGS, years)
+    shares = {
+        row["end"]: row["value"]
+        for row in annual_series(facts, SHARES_TAG, "shares", years + 2, splits, share_count=True)
+    }
+    history = []
+    for row in annual_series(facts, tag, EPS_UNIT, years, splits):
+        end = row["end"]
+        ocf = cash_flow.get(end)
+        # A company that tags capex in some years spent nothing in the years it omits it.
+        spent = capex.get(end, 0) if capex else None
+        fcf_ps = None
+        if ocf is not None and spent is not None and shares.get(end):
+            fcf_ps = (ocf - spent) / shares[end]
+        history.append(
+            {
+                "fiscal_year": row["fiscal_year"],
+                "end": end,
+                "eps": row["value"],
+                "fcf_ps": fcf_ps,
+                "revenue": revenue.get(end),
+                "ocf": ocf,
+                "capex": spent,
+            }
+        )
+    return history
 
 
 def _ttm_of_freshest(facts, tags):
@@ -314,8 +367,8 @@ def quality_inputs(facts, end):
         "current_assets": _first_at(facts, end, ["AssetsCurrent"]),
         "current_liabilities": _first_at(facts, end, ["LiabilitiesCurrent"]),
         "total_debt": total_debt(facts, end),
-        "net_income_ttm": _ttm_of_freshest(facts, ["NetIncomeLoss", "ProfitLoss"]),
-        "operating_income_ttm": _ttm_of_freshest(facts, ["OperatingIncomeLoss"]),
+        "net_income_ttm": _ttm_of_freshest(facts, NET_INCOME_TAGS),
+        "operating_income_ttm": _ttm_of_freshest(facts, OPERATING_INCOME_TAGS),
         "revenue_ttm": _ttm_of_freshest(facts, REVENUE_TAGS),
     }
 

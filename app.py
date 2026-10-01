@@ -1,5 +1,5 @@
 """10-Cap value investing dashboard. Runs in the browser via stlite, or locally with
-`streamlit run app.py` (after `python build_data.py && cp dist/data.json .`)."""
+`streamlit run app.py` (after `python fetch_data.py && python build_data.py`)."""
 
 import json
 from pathlib import Path
@@ -12,6 +12,8 @@ import valuation
 
 st.set_page_config(page_title="10-Cap Value Dashboard", page_icon="📉", layout="wide")
 
+MIN_FCF_YEARS = 3  # fewer years of cash-flow data than this and EPS is used instead
+
 
 @st.cache_data
 def load_data():
@@ -23,31 +25,76 @@ def load_data():
 
 data = load_data()
 if data is None:
-    st.error("data.json not found. Run `python build_data.py` first.")
+    st.error("data.json not found. Run `python fetch_data.py` then `python build_data.py`.")
     st.stop()
 
 companies = data["companies"]
 defaults = data.get("defaults", {})
 
 # ---------------------------------------------------------------- sidebar
-st.sidebar.header("Assumptions")
+st.sidebar.header("Valuation")
 r = st.sidebar.slider(
     "Hurdle rate (r) %", 5.0, 20.0, defaults.get("hurdle_rate", 0.10) * 100, 0.5
 ) / 100
 g = st.sidebar.slider(
-    "Growth rate (g) %", 0.0, 8.0, defaults.get("growth_rate", 0.03) * 100, 0.25
+    "Growth rate (g) %",
+    0.0,
+    8.0,
+    defaults.get("growth_rate", 0.03) * 100,
+    0.25,
+    help="Set to 0 for a strict 10-cap: at r = 10% the price ceiling is 10 × owner earnings.",
 ) / 100
 target = st.sidebar.slider("Target discount (margin of safety) %", 0, 90, 30, 5)
+BASES = {
+    "lower": "Lower of EPS and free cash flow",
+    "eps": "EPS only",
+    "fcf": "Free cash flow only",
+}
+basis = st.sidebar.radio(
+    "Owner earnings measured by",
+    list(BASES),
+    format_func=BASES.get,
+    help="Free cash flow is operating cash flow minus all capital spending, per share. "
+    "Taking the lower of the two avoids paying for accounting earnings that never become "
+    "cash. Financial companies always use EPS.",
+)
 window = st.sidebar.radio(
-    "Earnings average used for intrinsic value",
+    "Averaged over",
     [10, 5],
     format_func=lambda n: f"{n} years",
     horizontal=True,
-    help="10 years spans a full business cycle, which matters for cyclical companies. "
-    "Companies with a shorter history use the years they have.",
+    help="10 years spans a full business cycle, which matters for cyclical companies.",
 )
 sectors = sorted({c.get("sector") for c in companies if c.get("sector")})
 chosen_sectors = st.sidebar.multiselect("Sectors", sectors, placeholder="All sectors")
+
+st.sidebar.header("Stability filters")
+use_stability = st.sidebar.toggle("Screen out boom-bust businesses", value=True)
+with st.sidebar.expander("Thresholds", expanded=False):
+    min_years = st.number_input("Years of history, at least", value=10, min_value=3, max_value=10, step=1)
+    max_loss_years = st.number_input("Loss years, at most", value=1, min_value=0, step=1)
+    max_volatility = st.number_input(
+        "EPS volatility under",
+        value=0.75,
+        step=0.05,
+        help="Standard deviation of annual EPS divided by its average. Steady earners are "
+        "below about 0.5; boom-bust businesses are well above 1.",
+    )
+    max_peak = st.number_input(
+        "Current EPS ÷ long-run average, under",
+        value=2.5,
+        step=0.25,
+        help="A high value means today's earnings are far above the company's own history: "
+        "either strong growth or a cyclical peak.",
+    )
+    max_capex = st.number_input(
+        "Capex as % of operating cash flow, under",
+        value=60.0,
+        step=5.0,
+        help="Capital-heavy businesses (shipping, mining, energy) must keep reinvesting just "
+        "to stand still. Companies that do not report this pass.",
+    )
+    min_revenue_growth = st.number_input("Revenue growth per year, over %", value=0.0, step=1.0)
 
 st.sidebar.header("Quality filters")
 use_quality = st.sidebar.toggle("Apply Buffett screen", value=True)
@@ -63,7 +110,7 @@ with st.sidebar.expander("Thresholds", expanded=False):
         "Growth and PEG use historical EPS growth, not analyst forecasts. "
         "A company missing a metric fails that filter."
     )
-st.sidebar.caption(f"Data built {data.get('generated_at', 'unknown')} from SEC EDGAR filings.")
+st.sidebar.caption(f"SEC data downloaded {data.get('generated_at', 'unknown')}.")
 
 FUNNEL_LABELS = {
     "sec_registrant_tickers": "Tickers registered with the SEC",
@@ -74,7 +121,7 @@ FUNNEL_LABELS = {
     "valued": "…valued (positive TTM EPS, 3+ years of data)",
 }
 if data.get("funnel"):
-    with st.sidebar.expander("How the universe was screened", expanded=True):
+    with st.sidebar.expander("How the universe was screened", expanded=False):
         for key, count in data["funnel"].items():
             st.write(f"{FUNNEL_LABELS.get(key, key)}: **{count:,}**")
 
@@ -87,29 +134,40 @@ def pct(value):
     return None if value is None else value * 100
 
 
-def averages(company):
-    """(5-year, 10-year) average EPS from the company's history."""
-    eps = [h["eps"] for h in company["eps_history"]]
-    return valuation.normalized_eps(eps[-5:]), valuation.normalized_eps(eps[-10:])
+def averages(company, years):
+    """(average EPS, average free cash flow per share) over the last `years` fiscal years."""
+    history = company["history"][-years:]
+    return (
+        valuation.average([h["eps"] for h in history]),
+        valuation.average([h["fcf_ps"] for h in history], MIN_FCF_YEARS),
+    )
 
 
 def revalue(company):
-    """Re-run the valuation with the sidebar's r, g and averaging window."""
-    avg_5y, avg_10y = averages(company)
-    iv = valuation.intrinsic_value(avg_10y if window == 10 else avg_5y, r, g)
+    """Re-run the valuation with the sidebar's assumptions."""
+    avg_eps, avg_fcf = averages(company, window)
+    earnings = valuation.owner_earnings(avg_eps, avg_fcf, basis)
+    iv = valuation.intrinsic_value(earnings, r, g)
     return {
         "Ticker": company["ticker"],
         "Company": company["name"],
         "Sector": company.get("sector"),
         "Mkt Cap ($M)": (company.get("market_cap") or 0) / 1e6 or None,
         "Price": company["price"],
-        "TTM EPS": company.get("ttm_eps"),
-        "Avg EPS 5y": avg_5y,
-        "Avg EPS 10y": avg_10y,
-        "EPS Years": len(company["eps_history"]),
         "Intrinsic Value": iv,
-        "TBV / Share": company["tbv_per_share"],
         "Discount %": valuation.discount_pct(company["price"], iv),
+        "Owner Earnings": earnings,
+        "Avg EPS": avg_eps,
+        "Avg FCF/Sh": avg_fcf,
+        "TTM EPS": company.get("ttm_eps"),
+        "TBV / Share": company["tbv_per_share"],
+        "Price/TBV": company.get("price_to_tbv"),
+        "Years": len(company["history"]),
+        "Loss Years": company.get("loss_years"),
+        "EPS Volatility": company.get("eps_volatility"),
+        "EPS vs Avg": company.get("ttm_to_avg"),
+        "Capex/OCF %": pct(company.get("capex_to_ocf")),
+        "Rev Growth %": pct(company.get("revenue_growth")),
         "P/E": company.get("pe"),
         "PEG": company.get("peg"),
         "EPS Growth %": pct(company.get("eps_growth")),
@@ -124,8 +182,17 @@ table = pd.DataFrame([revalue(c) for c in companies])
 total_loaded = len(table)
 if chosen_sectors:
     table = table[table["Sector"].isin(chosen_sectors)]
+# Comparisons against NaN are False, so a company missing a metric fails that filter.
+if use_stability:
+    table = table[
+        (table["Years"] >= min_years)
+        & (table["Loss Years"] <= max_loss_years)
+        & (table["EPS Volatility"] < max_volatility)
+        & (table["EPS vs Avg"] < max_peak)
+        & ((table["Capex/OCF %"] < max_capex) | table["Capex/OCF %"].isna())
+        & (table["Rev Growth %"] > min_revenue_growth)
+    ]
 if use_quality:
-    # Comparisons against NaN are False, so companies missing a metric are excluded.
     table = table[
         (table["P/E"] < max_pe)
         & (table["PEG"] < max_peg)
@@ -138,8 +205,8 @@ if use_quality:
 
 st.title("10-Cap Value Investing Dashboard")
 st.caption(
-    f"Intrinsic value = {window}-year average EPS × (1 + g) / (r − g), with r = {r:.1%} and g = {g:.2%}. "
-    "Not investment advice."
+    f"Intrinsic value = {window}-year average owner earnings × (1 + g) / (r − g), "
+    f"with r = {r:.1%} and g = {g:.2%} ({(1 + g) / (r - g):.1f}× earnings). Not investment advice."
 )
 
 screener_tab, detail_tab = st.tabs(["Bargain screener", "Stock drill-down"])
@@ -161,6 +228,8 @@ with screener_tab:
             f"The closest is {best['Ticker']} at {best['Discount %']:+.1f}%. "
             "Lower the target discount in the sidebar, or tick “Show all companies”."
         )
+    elif table.empty:
+        st.info("No companies pass the sidebar filters. Loosen a threshold or switch a filter set off.")
 
     def discount_color(value):
         if pd.isna(value):
@@ -170,14 +239,20 @@ with screener_tab:
     money = "${:,.2f}"
     styler = view.style.format(
         {
-            "Price": money,
             "Mkt Cap ($M)": "{:,.0f}",
-            "TTM EPS": money,
-            "Avg EPS 5y": money,
-            "Avg EPS 10y": money,
+            "Price": money,
             "Intrinsic Value": money,
-            "TBV / Share": money,
             "Discount %": "{:+.1f}%",
+            "Owner Earnings": money,
+            "Avg EPS": money,
+            "Avg FCF/Sh": money,
+            "TTM EPS": money,
+            "TBV / Share": money,
+            "Price/TBV": "{:.1f}",
+            "EPS Volatility": "{:.2f}",
+            "EPS vs Avg": "{:.2f}",
+            "Capex/OCF %": "{:.0f}%",
+            "Rev Growth %": "{:+.1f}%",
             "P/E": "{:.1f}",
             "PEG": "{:.2f}",
             "EPS Growth %": "{:+.1f}%",
@@ -206,14 +281,23 @@ with screener_tab:
 # ---------------------------------------------------------------- drill-down
 with detail_tab:
     by_ticker = {c["ticker"]: c for c in companies}
+    # Companies passing the filters first, best discount first; then everything else.
+    passing = list(table.sort_values("Discount %", ascending=False, na_position="last")["Ticker"])
+    passing_set = set(passing)
+    options = passing + [t for t in by_ticker if t not in passing_set]
     ticker = st.selectbox(
-        "Company", list(by_ticker), format_func=lambda t: f"{t} — {by_ticker[t]['name']}"
+        "Company",
+        options,
+        format_func=lambda t: f"{t} — {by_ticker[t]['name']}" + ("" if t in passing_set else "  (filtered out)"),
     )
     company = by_ticker[ticker]
     row = revalue(company)
 
     def usd(value):
         return "—" if value is None or pd.isna(value) else f"${value:,.2f}"
+
+    def num(value, fmt="{:.2f}"):
+        return "—" if value is None or pd.isna(value) else fmt.format(value)
 
     price_col, iv_col, tbv_col = st.columns(3)
     price_col.metric("Current price", usd(row["Price"]))
@@ -223,49 +307,61 @@ with detail_tab:
         usd(row["Intrinsic Value"]),
         None if discount is None else f"{discount:+.1f}% margin of safety",
     )
-    tbv_col.metric("Tangible book value / share", usd(row["TBV / Share"]))
+    tbv_col.metric(
+        "Tangible book value / share",
+        usd(row["TBV / Share"]),
+        None if row["Price/TBV"] is None else f"price is {row['Price/TBV']:.1f}× book",
+        delta_color="off",
+    )
 
     if row["Intrinsic Value"] is None:
-        st.warning("Average EPS is not positive, so no intrinsic value can be computed.")
+        st.warning("Average owner earnings are not positive, so no intrinsic value can be computed.")
 
-    history = company["eps_history"]
+    stats = st.columns(6)
+    stats[0].metric(f"Avg EPS ({window}y)", usd(row["Avg EPS"]))
+    stats[1].metric(f"Avg FCF / share ({window}y)", usd(row["Avg FCF/Sh"]))
+    stats[2].metric("Loss years", num(row["Loss Years"], "{:.0f}") + f" of {row['Years']}")
+    stats[3].metric("EPS volatility", num(row["EPS Volatility"]))
+    stats[4].metric("Capex / cash flow", num(row["Capex/OCF %"], "{:.0f}%"))
+    stats[5].metric("Revenue growth / yr", num(row["Rev Growth %"], "{:+.1f}%"))
+
+    history = company["history"]
     years = [str(h["fiscal_year"]) for h in history]
-    eps = [h["eps"] for h in history]
-    fig = go.Figure(
-        go.Bar(
+    fig = go.Figure()
+    fig.add_bar(
+        name="Diluted EPS",
+        x=years,
+        y=[h["eps"] for h in history],
+        marker_color="#2563eb",
+        hovertemplate="FY %{x} EPS: $%{y:,.2f}<extra></extra>",
+    )
+    if any(h["fcf_ps"] is not None for h in history):
+        fig.add_bar(
+            name="Free cash flow / share",
             x=years,
-            y=eps,
-            marker_color=["#15803d" if v >= 0 else "#b91c1c" for v in eps],
-            text=[f"${v:,.2f}" for v in eps],
-            textposition="outside",
-            hovertemplate="FY %{x}: $%{y:,.2f}<extra></extra>",
+            y=[h["fcf_ps"] for h in history],
+            marker_color="#f59e0b",
+            hovertemplate="FY %{x} FCF/share: $%{y:,.2f}<extra></extra>",
         )
-    )
-    avg_5y, avg_10y = averages(company)
-    fig.add_hline(
-        y=avg_10y,
-        line_dash="dash" if window == 10 else "dot",
-        annotation_text=f"{min(10, len(eps))}-yr avg ${avg_10y:,.2f}",
-        annotation_position="top left",
-    )
-    if len(eps) > 5:
+    if row["Owner Earnings"] is not None:
         fig.add_hline(
-            y=avg_5y,
-            line_dash="dash" if window == 5 else "dot",
-            annotation_text=f"5-yr avg ${avg_5y:,.2f}",
-            annotation_position="top right",
+            y=row["Owner Earnings"],
+            line_dash="dash",
+            annotation_text=f"Owner earnings used: ${row['Owner Earnings']:,.2f}",
+            annotation_position="top left",
         )
     fig.update_layout(
-        title=f"{ticker} diluted EPS by fiscal year",
+        title=f"{ticker}: earnings and free cash flow per share by fiscal year",
         xaxis_title="Fiscal year",
-        yaxis_title="Diluted EPS (USD)",
+        yaxis_title="USD per share",
         xaxis_type="category",
-        showlegend=False,
+        barmode="group",
+        legend=dict(orientation="h", yanchor="bottom", y=1.0, xanchor="right", x=1),
     )
     st.plotly_chart(fig, use_container_width=True)
     if company.get("splits"):
         st.caption(
-            "EPS is adjusted for stock splits detected in the filings: "
+            "Per-share figures are adjusted for stock splits detected in the filings: "
             + ", ".join(
                 f"{s['factor']:.3g}-for-1 before {s['before']}"
                 if s["factor"] >= 1

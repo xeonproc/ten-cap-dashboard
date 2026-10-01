@@ -46,6 +46,44 @@ def peg(pe, growth):
     return pe / (growth * 100)
 
 
+def average(values, minimum=1):
+    """Mean of the non-missing values, or None when fewer than `minimum` are present."""
+    present = [v for v in values if v is not None]
+    return sum(present) / len(present) if len(present) >= minimum else None
+
+
+def owner_earnings(avg_eps, avg_fcf, basis="lower"):
+    """Per-share earnings to capitalise. "lower" takes the smaller of accounting EPS and
+    free cash flow, so earnings that never turn into cash are not paid for."""
+    if basis == "eps" or avg_fcf is None:
+        return avg_eps
+    if basis == "fcf" or avg_eps is None:
+        return avg_fcf
+    return min(avg_eps, avg_fcf)
+
+
+def volatility(values):
+    """Coefficient of variation (standard deviation / mean); None unless the mean is positive."""
+    present = [v for v in values if v is not None]
+    if len(present) < 2:
+        return None
+    mean = sum(present) / len(present)
+    if mean <= 0:
+        return None
+    return (sum((v - mean) ** 2 for v in present) / len(present)) ** 0.5 / mean
+
+
+def cagr(values):
+    """Compound annual growth between the first and last non-missing values."""
+    points = [(i, v) for i, v in enumerate(values) if v is not None]
+    if len(points) < 2:
+        return None
+    (first_i, first), (last_i, last) = points[0], points[-1]
+    if first <= 0 or last <= 0:
+        return None
+    return (last / first) ** (1 / (last_i - first_i)) - 1
+
+
 def discount_pct(price, intrinsic):
     """Margin of safety: positive when the stock trades below intrinsic value."""
     if price is None or not intrinsic:

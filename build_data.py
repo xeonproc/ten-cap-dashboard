@@ -1,97 +1,50 @@
-"""Screen the whole U.S. market, value the survivors, and write dist/data.json.
+"""Fast step, run on every build: compute valuations from the raw-data cache.
 
-Phase 1 (a handful of bulk requests) narrows every listed stock to profitable candidates.
-Phase 2 (one SEC request per candidate) pulls full fundamentals and computes valuations.
-
-Runs in GitHub Actions so the browser never has to call the data sources (no CORS issues).
+Reads cache/raw.jsonl.gz (written by fetch_data.py) and writes dist/data.json, which the
+dashboard loads. No network access, so it takes seconds.
 """
 
+import gzip
 import json
-import os
 import sys
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
-import market_data
 import sec_data
 import valuation
+from fetch_data import CACHE
 
 OUTPUT = Path(__file__).parent / "dist" / "data.json"
 
-# Phase 1 thresholds
-MAJOR_EXCHANGES = {"NYSE", "Nasdaq"}  # SEC labels NYSE American (AMEX) listings as NYSE
-MIN_MARKET_CAP = 100_000_000
-MAX_EPS_AGE_DAYS = 550  # ignore companies whose latest annual report is ~18+ months old
-
-# Phase 2 thresholds
-EPS_YEARS = 10  # fiscal years of EPS history to keep (long enough to span a business cycle)
+HISTORY_YEARS = 10  # fiscal years to keep (long enough to span a business cycle)
 MIN_EPS_YEARS = 3  # need at least this many fiscal years to normalize earnings
+MIN_FCF_YEARS = 3  # ...and this many to use free cash flow as an earnings basis
 MIN_PLAUSIBLE_PE = 1  # below this the EPS is almost certainly wrong (share classes, bad filings)
 
-# Optional cap on candidates, for quick test builds.
-CANDIDATE_LIMIT = int(os.environ.get("CANDIDATE_LIMIT") or 0)
+# Operating cash flow is not a measure of owner earnings for lenders and insurers.
+NO_FCF_SECTORS = {"Finance"}
 
 
-def select_candidates():
-    """Phase 1: return (candidates, funnel) where funnel counts survivors of each filter."""
-    universe = sec_data.load_universe()
-    listings = market_data.fetch_listings()
-    annual_eps = sec_data.latest_annual_eps_by_cik()
-    oldest_eps = (date.today() - timedelta(days=MAX_EPS_AGE_DAYS)).isoformat()
-
-    funnel = {"sec_registrant_tickers": len(universe), "listed_common_stocks": len(listings)}
-    on_exchange, sized, profitable = [], {}, []
-
-    for listing in listings:
-        info = universe.get(listing["ticker"].upper())
-        if info and info["exchange"] in MAJOR_EXCHANGES:
-            on_exchange.append({**listing, **info, "name": info["name"]})
-    funnel["on_major_exchange_with_sec_filings"] = len(on_exchange)
-
-    for stock in on_exchange:
-        if not (stock["price"] and stock["price"] > 0):
-            continue
-        if not (stock["market_cap"] and stock["market_cap"] > MIN_MARKET_CAP):
-            continue
-        # One row per company: keep the largest share class.
-        kept = sized.get(stock["cik"])
-        if kept is None or stock["market_cap"] > kept["market_cap"]:
-            sized[stock["cik"]] = stock
-    funnel["price_and_market_cap_ok"] = len(sized)
-
-    for stock in sized.values():
-        eps = annual_eps.get(stock["cik"])
-        if eps and eps["eps"] > 0 and eps["end"] >= oldest_eps:
-            profitable.append(stock)
-    funnel["positive_latest_annual_eps"] = len(profitable)
-
-    profitable.sort(key=lambda s: s["market_cap"], reverse=True)
-    if CANDIDATE_LIMIT:
-        profitable = profitable[:CANDIDATE_LIMIT]
-    return profitable, funnel
-
-
-def build_company(stock):
-    """Phase 2: full fundamentals and valuation for one candidate."""
-    facts = sec_data.fetch_company_facts(stock["cik"])
+def build_company(stock, facts):
+    """Fundamentals, quality metrics and default valuation for one candidate."""
     tag = sec_data.eps_tag(facts)
     if tag is None:
         raise ValueError("no annual EPS reported")
     splits = sec_data.detect_splits(facts, tag)
-    eps = sec_data.eps_history(facts, tag, EPS_YEARS, splits)
-    if len(eps) < MIN_EPS_YEARS:
-        raise ValueError(f"only {len(eps)} fiscal years of EPS")
+    history = sec_data.annual_history(facts, tag, splits, HISTORY_YEARS)
+    if len(history) < MIN_EPS_YEARS:
+        raise ValueError(f"only {len(history)} fiscal years of EPS")
     ttm = sec_data.ttm_eps(facts, tag, splits)
     if ttm is None or ttm <= 0:
         raise ValueError("TTM EPS is not positive")
-    if stock["price"] / ttm < MIN_PLAUSIBLE_PE:
+    price = stock["price"]
+    if price / ttm < MIN_PLAUSIBLE_PE:
         raise ValueError("implausible EPS relative to price (multiple share classes?)")
 
-    values = [row["value"] for row in eps]
-    norm_eps = valuation.normalized_eps(values)
-    norm_eps_5y = valuation.normalized_eps(values[-5:])
-    for norm in (norm_eps, norm_eps_5y):
-        if norm > 0 and stock["price"] / norm < MIN_PLAUSIBLE_PE:
+    eps = [year["eps"] for year in history]
+    avg_eps = valuation.average(eps)
+    for avg in (avg_eps, valuation.average(eps[-5:])):
+        if avg > 0 and price / avg < MIN_PLAUSIBLE_PE:
             raise ValueError("implausible historical EPS relative to price (bad filing data?)")
 
     bs = sec_data.balance_sheet(facts) or {}
@@ -100,36 +53,61 @@ def build_company(stock):
     if (q.get("net_income_ttm") or 0) < 0:
         raise ValueError("EPS is positive but net income is negative (mis-signed filing data)")
 
-    iv = valuation.intrinsic_value(norm_eps)
-    pe = stock["price"] / ttm
-    growth = valuation.eps_growth(values[-5:])
+    if stock["sector"] in NO_FCF_SECTORS:
+        for year in history:
+            year["fcf_ps"] = None
+    avg_fcf = valuation.average([year["fcf_ps"] for year in history], MIN_FCF_YEARS)
+    iv = valuation.intrinsic_value(valuation.owner_earnings(avg_eps, avg_fcf))
+
+    cash_years = [y for y in history if y["ocf"] is not None and y["capex"] is not None]
+    tbv = valuation.tbv_per_share(
+        bs.get("assets"), bs.get("liabilities"), bs.get("goodwill"), bs.get("intangibles"), shares
+    )
+    pe = price / ttm
+    growth = valuation.eps_growth(eps[-5:])
     return {
-        "normalized_eps_5y": norm_eps_5y,
-        "splits": [{"before": when, "factor": round(factor, 4)} for when, factor in splits],
-        "pe": pe,
-        "roe": valuation.ratio(q.get("net_income_ttm"), q.get("equity")),
-        "current_ratio": valuation.ratio(q.get("current_assets"), q.get("current_liabilities")),
-        "debt_to_equity": valuation.ratio(q.get("total_debt"), q.get("equity")),
-        "operating_margin": valuation.ratio(q.get("operating_income_ttm"), q.get("revenue_ttm")),
-        "eps_growth": growth,
-        "peg": valuation.peg(pe, growth),
         "ticker": stock["ticker"],
         "name": stock["name"],
         "cik": stock["cik"],
         "exchange": stock["exchange"],
         "sector": stock["sector"],
         "industry": stock["industry"],
-        "price": stock["price"],
+        "price": price,
         "market_cap": stock["market_cap"],
         "eps_basis": "diluted" if tag == sec_data.EPS_TAGS[0] else "basic",
-        "eps_history": [{"fiscal_year": r["fiscal_year"], "eps": r["value"]} for r in eps],
+        "history": [
+            {
+                "fiscal_year": y["fiscal_year"],
+                "eps": y["eps"],
+                "fcf_ps": None if y["fcf_ps"] is None else round(y["fcf_ps"], 4),
+            }
+            for y in history
+        ],
+        "splits": [{"before": when, "factor": round(factor, 4)} for when, factor in splits],
         "ttm_eps": ttm,
-        "normalized_eps": norm_eps,
         "intrinsic_value": iv,
-        "discount_pct": valuation.discount_pct(stock["price"], iv),
-        "tbv_per_share": valuation.tbv_per_share(
-            bs.get("assets"), bs.get("liabilities"), bs.get("goodwill"), bs.get("intangibles"), shares
-        ),
+        "discount_pct": valuation.discount_pct(price, iv),
+        # stability
+        "loss_years": sum(1 for v in eps if v < 0),
+        "eps_volatility": valuation.volatility(eps),
+        "ttm_to_avg": valuation.ratio(ttm, avg_eps),
+        "revenue_growth": valuation.cagr([y["revenue"] for y in history]),
+        "capex_to_ocf": valuation.ratio(
+            sum(y["capex"] for y in cash_years), sum(y["ocf"] for y in cash_years)
+        )
+        if cash_years
+        else None,
+        # quality
+        "pe": pe,
+        "peg": valuation.peg(pe, growth),
+        "eps_growth": growth,
+        "roe": valuation.ratio(q.get("net_income_ttm"), q.get("equity")),
+        "current_ratio": valuation.ratio(q.get("current_assets"), q.get("current_liabilities")),
+        "debt_to_equity": valuation.ratio(q.get("total_debt"), q.get("equity")),
+        "operating_margin": valuation.ratio(q.get("operating_income_ttm"), q.get("revenue_ttm")),
+        # balance sheet
+        "tbv_per_share": tbv,
+        "price_to_tbv": valuation.ratio(price, tbv),
         "balance_sheet_date": bs.get("date"),
         "assets": bs.get("assets"),
         "liabilities": bs.get("liabilities"),
@@ -140,26 +118,27 @@ def build_company(stock):
 
 
 def main():
-    candidates, funnel = select_candidates()
-    for step, count in funnel.items():
-        print(f"{step}: {count}")
-    print(f"Phase 2: analysing {len(candidates)} candidates")
+    if not CACHE.exists():
+        sys.exit(f"{CACHE} not found. Run fetch_data.py first.")
 
     companies, errors = [], []
-    for i, stock in enumerate(candidates, 1):
-        try:
-            companies.append(build_company(stock))
-        except Exception as exc:
-            errors.append({"ticker": stock["ticker"], "error": str(exc)})
-        if i % 100 == 0:
-            print(f"  {i}/{len(candidates)} ({len(companies)} valued, {len(errors)} dropped)")
-    funnel["valued"] = len(companies)
+    with gzip.open(CACHE, "rt", encoding="utf-8") as lines:
+        header = json.loads(next(lines))
+        for line in lines:
+            record = json.loads(line)
+            try:
+                companies.append(build_company(record["stock"], record["facts"]))
+            except Exception as exc:
+                errors.append({"ticker": record["stock"]["ticker"], "error": str(exc) or repr(exc)})
 
+    funnel = header["funnel"]
+    funnel["valued"] = len(companies)
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     OUTPUT.write_text(
         json.dumps(
             {
-                "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "generated_at": header["generated_at"],
+                "computed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "defaults": {
                     "hurdle_rate": valuation.DEFAULT_HURDLE_RATE,
                     "growth_rate": valuation.DEFAULT_GROWTH_RATE,
@@ -171,6 +150,11 @@ def main():
         )
     )
     print(f"Wrote {OUTPUT} ({len(companies)} companies, {len(errors)} dropped)")
+    reasons = {}
+    for error in errors:
+        reasons[error["error"]] = reasons.get(error["error"], 0) + 1
+    for reason, count in sorted(reasons.items(), key=lambda item: -item[1]):
+        print(f"  {count:5d}  {reason}")
     if not companies:
         sys.exit("No companies were built; failing so stale data is not replaced with nothing.")
 
