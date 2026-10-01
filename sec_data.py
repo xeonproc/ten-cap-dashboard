@@ -126,7 +126,7 @@ def _merge_split_candidates(candidates):
 def _is_clean_split_ratio(ratio):
     """True for ratios that look like a real split (2, 3, 1.5, 1/10, ...) rather than an
     accounting restatement or a filing error."""
-    if not 0.01 <= ratio <= 100:
+    if not 0.02 <= ratio <= 50:  # beyond this it is usually a units error (cents vs dollars)
         return False
     multiple = ratio if ratio >= 1 else 1 / ratio
     nearest = round(multiple * 2) / 2 if multiple < 3 else round(multiple)
