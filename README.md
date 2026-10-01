@@ -28,7 +28,7 @@ written to `data.json` and shown in the dashboard sidebar.
 
 ## Formulas
 
-- Normalized EPS = average of the last 5 fiscal years of diluted EPS
+- Normalized EPS = average of the last 10 fiscal years of diluted EPS (5-year average also shown; switchable in the sidebar), adjusted for stock splits detected from restated figures in later filings
 - Intrinsic value = Normalized EPS × (1 + g) / (r − g), defaults r = 10%, g = 3%
 - TBV/share = (Assets − Liabilities − Goodwill − Intangibles) / diluted shares
 - Discount % = (1 − Price / Intrinsic value) × 100

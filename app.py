@@ -38,6 +38,14 @@ g = st.sidebar.slider(
     "Growth rate (g) %", 0.0, 8.0, defaults.get("growth_rate", 0.03) * 100, 0.25
 ) / 100
 target = st.sidebar.slider("Target discount (margin of safety) %", 0, 90, 30, 5)
+window = st.sidebar.radio(
+    "Earnings average used for intrinsic value",
+    [10, 5],
+    format_func=lambda n: f"{n} years",
+    horizontal=True,
+    help="10 years spans a full business cycle, which matters for cyclical companies. "
+    "Companies with a shorter history use the years they have.",
+)
 sectors = sorted({c.get("sector") for c in companies if c.get("sector")})
 chosen_sectors = st.sidebar.multiselect("Sectors", sectors, placeholder="All sectors")
 
@@ -46,7 +54,7 @@ use_quality = st.sidebar.toggle("Apply Buffett screen", value=True)
 with st.sidebar.expander("Thresholds", expanded=False):
     max_pe = st.number_input("P/E under", value=25.0, step=1.0)
     max_peg = st.number_input("PEG under (past EPS growth)", value=2.0, step=0.25)
-    min_growth = st.number_input("EPS growth, past years, over %", value=5.0, step=1.0)
+    min_growth = st.number_input("EPS growth, past 5 years, over %", value=5.0, step=1.0)
     min_roe = st.number_input("Return on equity over %", value=15.0, step=1.0)
     min_current = st.number_input("Current ratio over", value=1.5, step=0.1)
     max_de = st.number_input("Debt / equity under", value=0.5, step=0.1)
@@ -79,9 +87,16 @@ def pct(value):
     return None if value is None else value * 100
 
 
+def averages(company):
+    """(5-year, 10-year) average EPS from the company's history."""
+    eps = [h["eps"] for h in company["eps_history"]]
+    return valuation.normalized_eps(eps[-5:]), valuation.normalized_eps(eps[-10:])
+
+
 def revalue(company):
-    """Re-run the valuation with the sidebar's r and g."""
-    iv = valuation.intrinsic_value(company["normalized_eps"], r, g)
+    """Re-run the valuation with the sidebar's r, g and averaging window."""
+    avg_5y, avg_10y = averages(company)
+    iv = valuation.intrinsic_value(avg_10y if window == 10 else avg_5y, r, g)
     return {
         "Ticker": company["ticker"],
         "Company": company["name"],
@@ -89,7 +104,9 @@ def revalue(company):
         "Mkt Cap ($M)": (company.get("market_cap") or 0) / 1e6 or None,
         "Price": company["price"],
         "TTM EPS": company.get("ttm_eps"),
-        "Normalized EPS": company["normalized_eps"],
+        "Avg EPS 5y": avg_5y,
+        "Avg EPS 10y": avg_10y,
+        "EPS Years": len(company["eps_history"]),
         "Intrinsic Value": iv,
         "TBV / Share": company["tbv_per_share"],
         "Discount %": valuation.discount_pct(company["price"], iv),
@@ -121,7 +138,7 @@ if use_quality:
 
 st.title("10-Cap Value Investing Dashboard")
 st.caption(
-    f"Intrinsic value = normalized EPS × (1 + g) / (r − g), with r = {r:.1%} and g = {g:.2%}. "
+    f"Intrinsic value = {window}-year average EPS × (1 + g) / (r − g), with r = {r:.1%} and g = {g:.2%}. "
     "Not investment advice."
 )
 
@@ -156,7 +173,8 @@ with screener_tab:
             "Price": money,
             "Mkt Cap ($M)": "{:,.0f}",
             "TTM EPS": money,
-            "Normalized EPS": money,
+            "Avg EPS 5y": money,
+            "Avg EPS 10y": money,
             "Intrinsic Value": money,
             "TBV / Share": money,
             "Discount %": "{:+.1f}%",
@@ -208,7 +226,7 @@ with detail_tab:
     tbv_col.metric("Tangible book value / share", usd(row["TBV / Share"]))
 
     if row["Intrinsic Value"] is None:
-        st.warning("Normalized EPS is not positive, so no intrinsic value can be computed.")
+        st.warning("Average EPS is not positive, so no intrinsic value can be computed.")
 
     history = company["eps_history"]
     years = [str(h["fiscal_year"]) for h in history]
@@ -223,11 +241,20 @@ with detail_tab:
             hovertemplate="FY %{x}: $%{y:,.2f}<extra></extra>",
         )
     )
+    avg_5y, avg_10y = averages(company)
     fig.add_hline(
-        y=company["normalized_eps"],
-        line_dash="dash",
-        annotation_text=f"Normalized EPS ${company['normalized_eps']:,.2f}",
+        y=avg_10y,
+        line_dash="dash" if window == 10 else "dot",
+        annotation_text=f"{min(10, len(eps))}-yr avg ${avg_10y:,.2f}",
+        annotation_position="top left",
     )
+    if len(eps) > 5:
+        fig.add_hline(
+            y=avg_5y,
+            line_dash="dash" if window == 5 else "dot",
+            annotation_text=f"5-yr avg ${avg_5y:,.2f}",
+            annotation_position="top right",
+        )
     fig.update_layout(
         title=f"{ticker} diluted EPS by fiscal year",
         xaxis_title="Fiscal year",
@@ -236,6 +263,17 @@ with detail_tab:
         showlegend=False,
     )
     st.plotly_chart(fig, use_container_width=True)
+    if company.get("splits"):
+        st.caption(
+            "EPS is adjusted for stock splits detected in the filings: "
+            + ", ".join(
+                f"{s['factor']:g}-for-1 before {s['before']}"
+                if s["factor"] >= 1
+                else f"1-for-{1 / s['factor']:g} reverse before {s['before']}"
+                for s in company["splits"]
+            )
+            + "."
+        )
 
     with st.expander(f"Balance sheet inputs (as of {company.get('balance_sheet_date') or 'n/a'})"):
         st.dataframe(

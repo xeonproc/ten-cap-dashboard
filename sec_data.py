@@ -18,6 +18,7 @@ FRAME_URL = "https://data.sec.gov/api/xbrl/frames/us-gaap/{tag}/USD-per-shares/C
 # Diluted is preferred; a minority of filers only tag basic EPS.
 EPS_TAGS = ("EarningsPerShareDiluted", "EarningsPerShareBasic")
 EPS_UNIT = "USD/shares"
+SHARES_TAG = "WeightedAverageNumberOfDilutedSharesOutstanding"
 
 # SEC fair-access limit is 10 requests/second; stay under it.
 REQUEST_INTERVAL = 0.12
@@ -94,7 +95,81 @@ def _latest_filed_per_end(rows):
     return best
 
 
-def annual_series(facts, tag, unit, years=5):
+def _by_period(rows):
+    """{(start, end): [rows sorted by filing date]} for duration facts."""
+    periods = {}
+    for row in rows:
+        if "start" in row and row.get("filed"):
+            periods.setdefault((row["start"], row["end"]), []).append(row)
+    for group in periods.values():
+        group.sort(key=lambda r: r["filed"])
+    return periods
+
+
+def _merge_split_candidates(candidates):
+    """Combine sightings of the same split. Each candidate is [before, after, factor, count]:
+    the split happened between filing dates `before` and `after`."""
+    events = []
+    for cand in sorted(candidates):
+        for event in events:
+            if cand[0] < event[1] and event[0] < cand[1] and 0.9 < cand[2] / event[2] < 1.1:
+                event[0] = max(event[0], cand[0])
+                event[1] = min(event[1], cand[1])
+                event[2] = (event[2] * event[3] + cand[2]) / (event[3] + 1)
+                event[3] += 1
+                break
+        else:
+            events.append(list(cand))
+    return events
+
+
+def detect_splits(facts, tag):
+    """Find stock splits from the filings themselves.
+
+    After a split, later filings restate earlier periods: the same period shows a new share
+    count and EPS. Comparing a period's value across filings reveals the split factor and
+    when it happened. Returns [(first_post_split_filing_date, factor)]; factor > 1 is a
+    forward split, < 1 a reverse split.
+    """
+    shares = _by_period(_facts(facts, SHARES_TAG, "shares"))
+    strong, weak = [], []
+    for period, rows in _by_period(_facts(facts, tag, EPS_UNIT)).items():
+        shares_at = {r["filed"]: r["val"] for r in shares.get(period, [])}
+        for old, new in zip(rows, rows[1:]):
+            if old["filed"] == new["filed"] or not old["val"] or not new["val"]:
+                continue
+            eps_ratio = old["val"] / new["val"]
+            if eps_ratio <= 0:
+                continue
+            old_shares, new_shares = shares_at.get(old["filed"]), shares_at.get(new["filed"])
+            if old_shares and new_shares and old_shares > 0 and new_shares > 0:
+                # Restated share count gives the exact factor; EPS must have moved to match.
+                factor = new_shares / old_shares
+                if (factor >= 1.15 or factor <= 0.87) and 0.7 * factor <= eps_ratio <= 1.3 * factor:
+                    strong.append([old["filed"], new["filed"], factor, 1])
+            elif eps_ratio >= 1.4 or eps_ratio <= 0.7:
+                weak.append([old["filed"], new["filed"], eps_ratio, 1])
+
+    events = _merge_split_candidates(strong)
+    # Without share counts, only trust an EPS jump seen consistently across several periods
+    # (an accounting restatement would not rescale every period by the same factor).
+    for event in _merge_split_candidates(weak):
+        overlaps = any(event[0] < e[1] and e[0] < event[1] for e in events)
+        if event[3] >= 2 and not overlaps:
+            events.append(event)
+    return sorted((after, factor) for _, after, factor, _ in events)
+
+
+def _split_adjusted(row, splits):
+    """A per-share value restated to today's share count."""
+    value = row["val"]
+    for first_post_split_filing, factor in splits:
+        if row.get("filed", "") < first_post_split_filing:
+            value /= factor
+    return value
+
+
+def annual_series(facts, tag, unit, years=5, splits=()):
     """Last `years` full-fiscal-year values of a duration fact, oldest first."""
     annual = [
         row
@@ -104,7 +179,10 @@ def annual_series(facts, tag, unit, years=5):
     ]
     best = _latest_filed_per_end(annual)
     ends = sorted(best)[-years:]
-    return [{"fiscal_year": int(end[:4]), "end": end, "value": best[end]["val"]} for end in ends]
+    return [
+        {"fiscal_year": int(end[:4]), "end": end, "value": _split_adjusted(best[end], splits)}
+        for end in ends
+    ]
 
 
 def _instants(facts, tag, unit="USD"):
@@ -121,17 +199,17 @@ def eps_tag(facts):
     return None
 
 
-def eps_history(facts, tag, years=5):
-    return annual_series(facts, tag, EPS_UNIT, years)
+def eps_history(facts, tag, years=10, splits=()):
+    return annual_series(facts, tag, EPS_UNIT, years, splits)
 
 
-def ttm_value(facts, tag, unit="USD"):
+def ttm_value(facts, tag, unit="USD", splits=()):
     """Trailing-twelve-month value of a duration fact: last fiscal year + current
     year-to-date - prior-year YTD.
 
     Falls back to the last fiscal year when no later quarterly report exists.
     """
-    annual = annual_series(facts, tag, unit, 1)
+    annual = annual_series(facts, tag, unit, 1, splits)
     if not annual:
         return None
     fy = annual[-1]
@@ -160,11 +238,11 @@ def ttm_value(facts, tag, unit="USD"):
     if not prior:
         return fy["value"]
     prior_ytd = max(prior, key=lambda r: r.get("filed", ""))
-    return fy["value"] + ytd["val"] - prior_ytd["val"]
+    return fy["value"] + _split_adjusted(ytd, splits) - _split_adjusted(prior_ytd, splits)
 
 
-def ttm_eps(facts, tag):
-    return ttm_value(facts, tag, EPS_UNIT)
+def ttm_eps(facts, tag, splits=()):
+    return ttm_value(facts, tag, EPS_UNIT, splits)
 
 
 REVENUE_TAGS = (
@@ -268,7 +346,7 @@ def balance_sheet(facts):
 
 def diluted_shares(facts):
     """Most recently reported weighted-average diluted share count."""
-    rows = _facts(facts, "WeightedAverageNumberOfDilutedSharesOutstanding", "shares")
+    rows = _facts(facts, SHARES_TAG, "shares")
     if not rows:
         return None
     return max(rows, key=lambda r: (r["end"], r.get("filed", "")))["val"]

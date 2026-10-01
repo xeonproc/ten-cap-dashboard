@@ -24,8 +24,9 @@ MIN_MARKET_CAP = 100_000_000
 MAX_EPS_AGE_DAYS = 550  # ignore companies whose latest annual report is ~18+ months old
 
 # Phase 2 thresholds
+EPS_YEARS = 10  # fiscal years of EPS history to keep (long enough to span a business cycle)
 MIN_EPS_YEARS = 3  # need at least this many fiscal years to normalize earnings
-MIN_PLAUSIBLE_PE = 1  # below this the EPS is almost certainly per a different share class
+MIN_PLAUSIBLE_PE = 1  # below this the EPS is almost certainly wrong (share classes, bad filings)
 
 # Optional cap on candidates, for quick test builds.
 CANDIDATE_LIMIT = int(os.environ.get("CANDIDATE_LIMIT") or 0)
@@ -76,24 +77,35 @@ def build_company(stock):
     tag = sec_data.eps_tag(facts)
     if tag is None:
         raise ValueError("no annual EPS reported")
-    eps = sec_data.eps_history(facts, tag)
+    splits = sec_data.detect_splits(facts, tag)
+    eps = sec_data.eps_history(facts, tag, EPS_YEARS, splits)
     if len(eps) < MIN_EPS_YEARS:
         raise ValueError(f"only {len(eps)} fiscal years of EPS")
-    ttm = sec_data.ttm_eps(facts, tag)
+    ttm = sec_data.ttm_eps(facts, tag, splits)
     if ttm is None or ttm <= 0:
         raise ValueError("TTM EPS is not positive")
     if stock["price"] / ttm < MIN_PLAUSIBLE_PE:
         raise ValueError("implausible EPS relative to price (multiple share classes?)")
 
+    values = [row["value"] for row in eps]
+    norm_eps = valuation.normalized_eps(values)
+    norm_eps_5y = valuation.normalized_eps(values[-5:])
+    for norm in (norm_eps, norm_eps_5y):
+        if norm > 0 and stock["price"] / norm < MIN_PLAUSIBLE_PE:
+            raise ValueError("implausible historical EPS relative to price (bad filing data?)")
+
     bs = sec_data.balance_sheet(facts) or {}
     shares = sec_data.diluted_shares(facts)
-    norm_eps = valuation.normalized_eps([row["value"] for row in eps])
-    iv = valuation.intrinsic_value(norm_eps)
-
     q = sec_data.quality_inputs(facts, bs["date"]) if bs else {}
+    if (q.get("net_income_ttm") or 0) < 0:
+        raise ValueError("EPS is positive but net income is negative (mis-signed filing data)")
+
+    iv = valuation.intrinsic_value(norm_eps)
     pe = stock["price"] / ttm
-    growth = valuation.eps_growth([row["value"] for row in eps])
+    growth = valuation.eps_growth(values[-5:])
     return {
+        "normalized_eps_5y": norm_eps_5y,
+        "splits": [{"before": when, "factor": round(factor, 4)} for when, factor in splits],
         "pe": pe,
         "roe": valuation.ratio(q.get("net_income_ttm"), q.get("equity")),
         "current_ratio": valuation.ratio(q.get("current_assets"), q.get("current_liabilities")),
