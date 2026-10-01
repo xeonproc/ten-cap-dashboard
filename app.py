@@ -55,14 +55,16 @@ if data is None:
 defaults = data.get("defaults", {})
 
 # ---------------------------------------------------------------- sidebar
-MODES = {"us": "US companies", "foreign": "Foreign companies (US-listed)"}
+MODES = {"us": "US-style reporters", "foreign": "Foreign reporters (US-listed)"}
 mode = st.sidebar.radio(
     "Market",
     list(MODES),
     format_func=MODES.get,
-    help="Foreign mode covers companies based outside the US that trade on NYSE or NASDAQ, "
-    "usually as depositary shares. Their accounts are converted to US dollars and are "
-    "less precise than the US figures; see the Formulas tab.",
+    help="The split is by how a company reports, not where its head office is. US-style: "
+    "US accounting rules, US dollars, quarterly filings (this includes some companies based "
+    "abroad, such as lululemon or Accenture). Foreign: annual reports only, often in another "
+    "currency or under international rules, usually listed as depositary shares. Foreign "
+    "figures are converted to dollars and are less precise; see the Formulas tab.",
 )
 foreign_mode = mode == "foreign"
 companies = [c for c in data["companies"] if bool(c.get("foreign")) == foreign_mode]

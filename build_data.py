@@ -267,13 +267,27 @@ def build_foreign_company(stock, facts, exchange_rates):
 
 
 def is_foreign(stock, facts):
-    """Foreign path for anything domiciled abroad, listed as depositary shares, or not
-    reporting in US dollars under US GAAP."""
-    if stock.get("foreign"):
+    """Which valuation path and dashboard mode a company belongs to.
+
+    What matters is how the company reports, not where its head office is. A company based
+    abroad that reports exactly like a US one (US GAAP, dollars, quarterly filings, and a
+    US-listed share that is an ordinary share) is treated as US: lululemon, Accenture, Eaton.
+    """
+    if not facts or not facts.get("currency"):
+        return bool(stock.get("foreign"))
+    if facts.get("taxonomy") != "us-gaap" or facts.get("currency") != "USD":
         return True
-    if not facts:
+    if not stock.get("foreign"):
         return False
-    return (facts.get("taxonomy") or "us-gaap") != "us-gaap" or (facts.get("currency") or "USD") != "USD"
+    recent = (date.today() - timedelta(days=FOREIGN_MAX_AGE_DAYS)).isoformat()
+    if not sec_data.files_quarterly(facts, recent):
+        return True
+    # If the listed share were a depositary share standing for several ordinary shares, the
+    # filed share count would not match the market cap.
+    shares = sec_data.diluted_shares(facts)
+    if not shares:
+        return True
+    return not 0.7 <= stock["market_cap"] / (stock["price"] * shares) <= 1.4
 
 
 def read_cache():

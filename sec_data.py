@@ -117,6 +117,16 @@ def detect_context(raw_facts):
     return (best[1], best[2]) if best else None
 
 
+def files_quarterly(facts, since):
+    """True if the company has filed quarterly EPS figures for a period ending after `since`
+    (an ISO date). US-style filers (10-K / 10-Q) do; foreign-style filers (20-F / 40-F) do not."""
+    for tag in tags(facts, "eps"):
+        for row in _facts(facts, tag, EPS_UNIT):
+            if row.get("fp") in ("Q1", "Q2", "Q3") and row["end"] >= since:
+                return True
+    return False
+
+
 def tags(facts, group):
     """The tags for a concept, in this company's accounting standard."""
     return TAXONOMIES[facts.get("taxonomy") or "us-gaap"][group]
