@@ -77,6 +77,14 @@ with screener_tab:
 
     st.subheader(f"{len(view)} of {len(table)} companies" + ("" if show_all else f" at ≥ {target}% discount"))
 
+    if view.empty and table["Discount %"].notna().any():
+        best = table.loc[table["Discount %"].idxmax()]
+        st.info(
+            f"All {len(table)} companies loaded, but none trade at a ≥ {target}% discount. "
+            f"The closest is {best['Ticker']} at {best['Discount %']:+.1f}%. "
+            "Lower the target discount in the sidebar, or tick “Show all companies”."
+        )
+
     def discount_color(value):
         if pd.isna(value):
             return ""
