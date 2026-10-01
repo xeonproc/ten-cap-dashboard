@@ -18,13 +18,15 @@ from pathlib import Path
 
 import sec_data
 import valuation
-from fetch_data import CACHE, MAX_EPS_AGE_DAYS
+from fetch_data import CACHE
 
 OUTPUT = Path(__file__).parent / "dist" / "data.json"
 
 HISTORY_YEARS = 10  # fiscal years to keep (long enough to span a business cycle)
 MIN_EPS_YEARS = 3  # need at least this many fiscal years to normalize earnings
 MIN_FCF_YEARS = 3  # ...and this many to use free cash flow as an earnings basis
+# Foreign annual reports reach the SEC's data feed later than US ones, sometimes by a year.
+FOREIGN_MAX_AGE_DAYS = 800
 MIN_PLAUSIBLE_PE = 1  # below this the EPS is almost certainly wrong (share classes, bad filings)
 
 # Operating cash flow is not a measure of owner earnings for lenders and insurers.
@@ -206,7 +208,7 @@ def build_foreign_company(stock, facts, exchange_rates):
     if len(history) < MIN_EPS_YEARS:
         raise ValueError(f"only {len(history)} fiscal years of profit figures")
     latest = history[-1]
-    if latest["end"] < (date.today() - timedelta(days=MAX_EPS_AGE_DAYS)).isoformat():
+    if latest["end"] < (date.today() - timedelta(days=FOREIGN_MAX_AGE_DAYS)).isoformat():
         raise ValueError(f"latest annual figures are stale ({latest['end']})")
 
     # Foreign filers rarely provide machine-readable quarterly figures, so the latest

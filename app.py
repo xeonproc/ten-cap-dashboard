@@ -193,7 +193,15 @@ def revalue(company):
         "Ticker": company["ticker"],
         "Company": company["name"],
         "Sector": company.get("sector"),
-        **({"Country": company.get("country"), "Reports In": company.get("currency")} if foreign_mode else {}),
+        **(
+            {
+                "Country": company.get("country"),
+                "Reports In": company.get("currency"),
+                "FY End": company.get("fiscal_year_end"),
+            }
+            if foreign_mode
+            else {}
+        ),
         "Mkt Cap ($M)": (company.get("market_cap") or 0) / 1e6 or None,
         "Price": company["price"],
         "Intrinsic Value": iv,
