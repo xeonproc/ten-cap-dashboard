@@ -132,7 +132,6 @@ st.sidebar.button(
     "Reset to defaults",
     on_click=apply_defaults,
     args=(mode,),
-    help=f"Put every setting below back to the starting values for {MODES[mode]}.",
     use_container_width=True,
 )
 
