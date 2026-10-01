@@ -507,12 +507,9 @@ with formulas_tab:
     if foreign_mode:
         st.markdown("### Part 0 — How foreign companies are converted")
         st.code(
-            "per-share figure = company total in its own currency
-"
-            "                   x average USD exchange rate for that fiscal year
-"
-            "                   / number of US-listed shares
-"
+            "per-share figure = company total in its own currency\n"
+            "                   x average USD exchange rate for that fiscal year\n"
+            "                   / number of US-listed shares\n"
             "number of US-listed shares = market cap / share price",
             language=None,
         )
@@ -527,10 +524,8 @@ with formulas_tab:
         )
         st.caption(f"Example: {example_ticker}")
         st.code(
-            f"reports in {ex.get('currency')} under {ex.get('accounting')}
-"
-            f"US-listed shares = {big(ex.get('market_cap'))} / {m(ex['price'])} = {n(ex.get('shares_outstanding'), '{:,.0f}')}
-"
+            f"reports in {ex.get('currency')} under {ex.get('accounting')}\n"
+            f"US-listed shares = {big(ex.get('market_cap'))} / {m(ex['price'])} = {n(ex.get('shares_outstanding'), '{:,.0f}')}\n"
             f"implied ordinary shares per US-listed share = {n(ex.get('shares_per_listed_share'), '{:g}')}",
             language=None,
         )
