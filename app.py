@@ -65,13 +65,14 @@ QUALITY_FILTERS = {
     "margin": "Operating margin",
 }
 
-# Starting values for every control, per market. Foreign figures are annual-only and
-# distorted by exchange rates, so that preset is looser and leans on the measures that
-# survive currency conversion (ROE, debt/equity, P/E).
+# Starting values for every control, per market.
+# The target discount starts at 0 so the screener opens as a watchlist ranked by discount;
+# the full seven-filter Buffett screen at a 30% discount matches nothing in a normal market.
+# Foreign figures are annual-only and distorted by exchange rates, so that preset is looser.
 US_DEFAULTS = {
     "r_pct": built.get("hurdle_rate", 0.10) * 100,
     "g_pct": built.get("growth_rate", 0.03) * 100,
-    "target": 30,
+    "target": 0,
     "basis": "lower",
     "window": 10,
     "sectors": [],
@@ -83,13 +84,13 @@ US_DEFAULTS = {
     "max_capex": 60.0,
     "min_revenue_growth": 0.0,
     "use_quality": True,
-    "quality_active": list(QUALITY_FILTERS),
-    "max_pe": 25.0,
+    "quality_active": ["pe", "roe", "de"],
+    "max_pe": 20.0,
     "max_peg": 2.0,
     "min_growth": 5.0,
     "min_roe": 15.0,
     "min_current": 1.5,
-    "max_de": 0.5,
+    "max_de": 1.0,
     "min_margin": 15.0,
     "data_checks": True,
 }
@@ -100,9 +101,7 @@ DEFAULTS = {
         "min_years": 5,
         "max_loss_years": 0,
         "max_volatility": 1.0,
-        "quality_active": ["pe", "roe", "de"],
         "max_pe": 15.0,
-        "max_de": 1.0,
     },
 }
 
@@ -152,7 +151,15 @@ g = st.sidebar.slider(
     key="g_pct",
     help="Set to 0 for a strict 10-cap: at r = 10% the price ceiling is 10 × owner earnings.",
 ) / 100
-target = st.sidebar.slider("Target discount (margin of safety) %", 0, 90, step=5, key="target")
+target = st.sidebar.slider(
+    "Target discount (margin of safety) %",
+    0,
+    90,
+    step=5,
+    key="target",
+    help="At 0 the screener is a watchlist of everything priced at or below intrinsic value. "
+    "The estimate can be wrong, so many value investors only buy at 30% or more below it.",
+)
 BASES = {
     "lower": "Lower of EPS and free cash flow",
     "eps": "EPS only",
@@ -216,9 +223,9 @@ with st.sidebar.expander("Thresholds", expanded=False):
         list(QUALITY_FILTERS),
         format_func=QUALITY_FILTERS.get,
         key="quality_active",
-        help="Remove a filter to ignore that measure entirely. The US default is the full "
-        "Buffett screen; the foreign default keeps the three measures that survive currency "
-        "conversion.",
+        help="Remove a filter to ignore that measure entirely. The default is three measures: "
+        "not expensive (P/E), profitable (return on equity) and not over-borrowed (debt / "
+        "equity). Add the other four for the full Buffett screen.",
     )
     max_pe = st.number_input("P/E under", step=1.0, key="max_pe")
     max_peg = st.number_input("PEG under (past EPS growth)", step=0.25, key="max_peg")
