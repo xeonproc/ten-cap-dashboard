@@ -123,6 +123,16 @@ def _merge_split_candidates(candidates):
     return events
 
 
+def _is_clean_split_ratio(ratio):
+    """True for ratios that look like a real split (2, 3, 1.5, 1/10, ...) rather than an
+    accounting restatement or a filing error."""
+    if not 0.01 <= ratio <= 100:
+        return False
+    multiple = ratio if ratio >= 1 else 1 / ratio
+    nearest = round(multiple * 2) / 2 if multiple < 3 else round(multiple)
+    return nearest >= 1.5 and abs(multiple - nearest) / nearest <= 0.015
+
+
 def detect_splits(facts, tag):
     """Find stock splits from the filings themselves.
 
@@ -145,9 +155,12 @@ def detect_splits(facts, tag):
             if old_shares and new_shares and old_shares > 0 and new_shares > 0:
                 # Restated share count gives the exact factor; EPS must have moved to match.
                 factor = new_shares / old_shares
-                if (factor >= 1.15 or factor <= 0.87) and 0.7 * factor <= eps_ratio <= 1.3 * factor:
+                if (
+                    (0.01 <= factor <= 0.87 or 1.15 <= factor <= 100)
+                    and 0.7 * factor <= eps_ratio <= 1.3 * factor
+                ):
                     strong.append([old["filed"], new["filed"], factor, 1])
-            elif eps_ratio >= 1.4 or eps_ratio <= 0.7:
+            elif _is_clean_split_ratio(eps_ratio):
                 weak.append([old["filed"], new["filed"], eps_ratio, 1])
 
     events = _merge_split_candidates(strong)
@@ -155,7 +168,7 @@ def detect_splits(facts, tag):
     # (an accounting restatement would not rescale every period by the same factor).
     for event in _merge_split_candidates(weak):
         overlaps = any(event[0] < e[1] and e[0] < event[1] for e in events)
-        if event[3] >= 2 and not overlaps:
+        if event[3] >= 3 and not overlaps:
             events.append(event)
     return sorted((after, factor) for _, after, factor, _ in events)
 
