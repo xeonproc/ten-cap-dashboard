@@ -1,0 +1,5 @@
+requests>=2.31
+# Only needed to preview the dashboard locally (`streamlit run app.py`):
+streamlit
+plotly
+pandas

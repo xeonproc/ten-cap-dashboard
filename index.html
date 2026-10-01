@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <title>10-Cap Value Dashboard</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@stlite/browser@1.9.2/build/stlite.css" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module">
+      import { mount } from "https://cdn.jsdelivr.net/npm/@stlite/browser@1.9.2/build/stlite.js";
+
+      // Same-origin static files, copied into the in-browser filesystem.
+      const file = (name) => ({ url: new URL(name, window.location.href).href });
+
+      mount(
+        {
+          requirements: ["plotly"],
+          entrypoint: "app.py",
+          files: {
+            "app.py": file("app.py"),
+            "valuation.py": file("valuation.py"),
+            // cache-bust so a fresh daily build is picked up
+            "data.json": file(`data.json?v=${Date.now()}`),
+          },
+        },
+        document.getElementById("root"),
+      );
+    </script>
+  </body>
+</html>

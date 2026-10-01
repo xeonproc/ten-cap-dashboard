@@ -1,0 +1,49 @@
+name: Build data and deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "30 22 * * 1-5" # weekdays, after the US market close
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests
+      - name: Build data.json
+        env:
+          # Set a repository variable SEC_USER_AGENT ("Your Name you@example.com") to
+          # identify yourself to the SEC; otherwise the default in sec_data.py is used.
+          SEC_USER_AGENT: ${{ vars.SEC_USER_AGENT || 'FinancialApp admin@myproject.com' }}
+        run: python build_data.py
+      - name: Assemble static site
+        run: cp index.html app.py valuation.py dist/
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
