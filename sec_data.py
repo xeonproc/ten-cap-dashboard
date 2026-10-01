@@ -125,12 +125,13 @@ def eps_history(facts, tag, years=5):
     return annual_series(facts, tag, EPS_UNIT, years)
 
 
-def ttm_eps(facts, tag):
-    """Trailing-twelve-month EPS: last fiscal year + current year-to-date - prior-year YTD.
+def ttm_value(facts, tag, unit="USD"):
+    """Trailing-twelve-month value of a duration fact: last fiscal year + current
+    year-to-date - prior-year YTD.
 
     Falls back to the last fiscal year when no later quarterly report exists.
     """
-    annual = annual_series(facts, tag, EPS_UNIT, 1)
+    annual = annual_series(facts, tag, unit, 1)
     if not annual:
         return None
     fy = annual[-1]
@@ -138,7 +139,7 @@ def ttm_eps(facts, tag):
     # Year-to-date periods of the fiscal year in progress (they start after the last FY ended).
     partial = [
         row
-        for row in _facts(facts, tag, EPS_UNIT)
+        for row in _facts(facts, tag, unit)
         if "start" in row and row["start"] > fy["end"] and _days(row) < 350
     ]
     if not partial:
@@ -151,7 +152,7 @@ def ttm_eps(facts, tag):
     target_end = date.fromisoformat(ytd["end"]) - timedelta(days=365)
     prior = [
         row
-        for row in _facts(facts, tag, EPS_UNIT)
+        for row in _facts(facts, tag, unit)
         if "start" in row
         and abs((date.fromisoformat(row["end"]) - target_end).days) <= 10
         and abs(_days(row) - _days(ytd)) <= 10
@@ -160,6 +161,72 @@ def ttm_eps(facts, tag):
         return fy["value"]
     prior_ytd = max(prior, key=lambda r: r.get("filed", ""))
     return fy["value"] + ytd["val"] - prior_ytd["val"]
+
+
+def ttm_eps(facts, tag):
+    return ttm_value(facts, tag, EPS_UNIT)
+
+
+REVENUE_TAGS = (
+    "Revenues",
+    "RevenueFromContractWithCustomerExcludingAssessedTax",
+    "RevenueFromContractWithCustomerIncludingAssessedTax",
+    "SalesRevenueNet",
+)
+
+
+def _ttm_of_freshest(facts, tags):
+    """TTM value of whichever tag was reported for the most recent fiscal year
+    (companies switch between equivalent tags over time)."""
+    latest = {}
+    for tag in tags:
+        annual = annual_series(facts, tag, "USD", 1)
+        if annual:
+            latest[tag] = annual[-1]["end"]
+    if not latest:
+        return None
+    return ttm_value(facts, max(latest, key=latest.get))
+
+
+def _first_at(facts, end, tags):
+    for tag in tags:
+        value = _instants(facts, tag).get(end)
+        if value is not None:
+            return value
+    return None
+
+
+def total_debt(facts, end):
+    """Approximate interest-bearing debt at `end`. Filers tag debt inconsistently, so this
+    tries the common combinations; a company that tags none of them is treated as debt-free."""
+    combined = _first_at(facts, end, ["DebtLongtermAndShorttermCombinedAmount"])
+    if combined is not None:
+        return combined
+    long_term = _first_at(
+        facts, end, ["LongTermDebt", "LongTermDebtAndCapitalLeaseObligationsIncludingCurrentMaturities"]
+    )
+    if long_term is None:
+        long_term = (
+            _first_at(facts, end, ["LongTermDebtNoncurrent", "LongTermDebtAndCapitalLeaseObligations"]) or 0
+        ) + (
+            _first_at(facts, end, ["LongTermDebtCurrent", "LongTermDebtAndCapitalLeaseObligationsCurrent"])
+            or 0
+        )
+    short_term = _first_at(facts, end, ["ShortTermBorrowings", "CommercialPaper"]) or 0
+    return long_term + short_term
+
+
+def quality_inputs(facts, end):
+    """Raw figures behind the quality ratios, as of balance-sheet date `end`."""
+    return {
+        "equity": _first_at(facts, end, ["StockholdersEquity"]),
+        "current_assets": _first_at(facts, end, ["AssetsCurrent"]),
+        "current_liabilities": _first_at(facts, end, ["LiabilitiesCurrent"]),
+        "total_debt": total_debt(facts, end),
+        "net_income_ttm": _ttm_of_freshest(facts, ["NetIncomeLoss", "ProfitLoss"]),
+        "operating_income_ttm": _ttm_of_freshest(facts, ["OperatingIncomeLoss"]),
+        "revenue_ttm": _ttm_of_freshest(facts, REVENUE_TAGS),
+    }
 
 
 def balance_sheet(facts):

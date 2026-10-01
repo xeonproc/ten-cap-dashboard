@@ -40,6 +40,21 @@ g = st.sidebar.slider(
 target = st.sidebar.slider("Target discount (margin of safety) %", 0, 90, 30, 5)
 sectors = sorted({c.get("sector") for c in companies if c.get("sector")})
 chosen_sectors = st.sidebar.multiselect("Sectors", sectors, placeholder="All sectors")
+
+st.sidebar.header("Quality filters")
+use_quality = st.sidebar.toggle("Apply Buffett screen", value=True)
+with st.sidebar.expander("Thresholds", expanded=False):
+    max_pe = st.number_input("P/E under", value=25.0, step=1.0)
+    max_peg = st.number_input("PEG under (past EPS growth)", value=2.0, step=0.25)
+    min_growth = st.number_input("EPS growth, past years, over %", value=5.0, step=1.0)
+    min_roe = st.number_input("Return on equity over %", value=15.0, step=1.0)
+    min_current = st.number_input("Current ratio over", value=1.5, step=0.1)
+    max_de = st.number_input("Debt / equity under", value=0.5, step=0.1)
+    min_margin = st.number_input("Operating margin over %", value=15.0, step=1.0)
+    st.caption(
+        "Growth and PEG use historical EPS growth, not analyst forecasts. "
+        "A company missing a metric fails that filter."
+    )
 st.sidebar.caption(f"Data built {data.get('generated_at', 'unknown')} from SEC EDGAR filings.")
 
 FUNNEL_LABELS = {
@@ -60,6 +75,10 @@ if r <= g:
     st.stop()
 
 
+def pct(value):
+    return None if value is None else value * 100
+
+
 def revalue(company):
     """Re-run the valuation with the sidebar's r and g."""
     iv = valuation.intrinsic_value(company["normalized_eps"], r, g)
@@ -74,12 +93,31 @@ def revalue(company):
         "Intrinsic Value": iv,
         "TBV / Share": company["tbv_per_share"],
         "Discount %": valuation.discount_pct(company["price"], iv),
+        "P/E": company.get("pe"),
+        "PEG": company.get("peg"),
+        "EPS Growth %": pct(company.get("eps_growth")),
+        "ROE %": pct(company.get("roe")),
+        "Current Ratio": company.get("current_ratio"),
+        "Debt/Equity": company.get("debt_to_equity"),
+        "Op Margin %": pct(company.get("operating_margin")),
     }
 
 
 table = pd.DataFrame([revalue(c) for c in companies])
+total_loaded = len(table)
 if chosen_sectors:
     table = table[table["Sector"].isin(chosen_sectors)]
+if use_quality:
+    # Comparisons against NaN are False, so companies missing a metric are excluded.
+    table = table[
+        (table["P/E"] < max_pe)
+        & (table["PEG"] < max_peg)
+        & (table["EPS Growth %"] > min_growth)
+        & (table["ROE %"] > min_roe)
+        & (table["Current Ratio"] > min_current)
+        & (table["Debt/Equity"] < max_de)
+        & (table["Op Margin %"] > min_margin)
+    ]
 
 st.title("10-Cap Value Investing Dashboard")
 st.caption(
@@ -96,11 +134,13 @@ with screener_tab:
     view = view.sort_values("Discount %", ascending=False, na_position="last")
 
     st.subheader(f"{len(view)} of {len(table)} companies" + ("" if show_all else f" at ≥ {target}% discount"))
+    if len(table) < total_loaded:
+        st.caption(f"{len(table):,} of {total_loaded:,} loaded companies pass the sidebar filters.")
 
     if view.empty and table["Discount %"].notna().any():
         best = table.loc[table["Discount %"].idxmax()]
         st.info(
-            f"{len(table)} companies loaded, but none trade at a ≥ {target}% discount. "
+            f"{len(table)} companies pass the filters, but none trade at a ≥ {target}% discount. "
             f"The closest is {best['Ticker']} at {best['Discount %']:+.1f}%. "
             "Lower the target discount in the sidebar, or tick “Show all companies”."
         )
@@ -120,6 +160,13 @@ with screener_tab:
             "Intrinsic Value": money,
             "TBV / Share": money,
             "Discount %": "{:+.1f}%",
+            "P/E": "{:.1f}",
+            "PEG": "{:.2f}",
+            "EPS Growth %": "{:+.1f}%",
+            "ROE %": "{:.1f}%",
+            "Current Ratio": "{:.2f}",
+            "Debt/Equity": "{:.2f}",
+            "Op Margin %": "{:.1f}%",
         },
         na_rep="—",
     )

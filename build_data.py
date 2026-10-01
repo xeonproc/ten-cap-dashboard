@@ -89,7 +89,18 @@ def build_company(stock):
     shares = sec_data.diluted_shares(facts)
     norm_eps = valuation.normalized_eps([row["value"] for row in eps])
     iv = valuation.intrinsic_value(norm_eps)
+
+    q = sec_data.quality_inputs(facts, bs["date"]) if bs else {}
+    pe = stock["price"] / ttm
+    growth = valuation.eps_growth([row["value"] for row in eps])
     return {
+        "pe": pe,
+        "roe": valuation.ratio(q.get("net_income_ttm"), q.get("equity")),
+        "current_ratio": valuation.ratio(q.get("current_assets"), q.get("current_liabilities")),
+        "debt_to_equity": valuation.ratio(q.get("total_debt"), q.get("equity")),
+        "operating_margin": valuation.ratio(q.get("operating_income_ttm"), q.get("revenue_ttm")),
+        "eps_growth": growth,
+        "peg": valuation.peg(pe, growth),
         "ticker": stock["ticker"],
         "name": stock["name"],
         "cik": stock["cik"],
