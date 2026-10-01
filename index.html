@@ -12,7 +12,8 @@
       import { mount } from "https://cdn.jsdelivr.net/npm/@stlite/browser@1.9.2/build/stlite.js";
 
       // Same-origin static files, copied into the in-browser filesystem.
-      const file = (name) => ({ url: new URL(name, window.location.href).href });
+      // cache-busted so each deploy and daily build is picked up immediately
+      const file = (name) => ({ url: new URL(`${name}?v=${Date.now()}`, window.location.href).href });
 
       mount(
         {
@@ -21,8 +22,7 @@
           files: {
             "app.py": file("app.py"),
             "valuation.py": file("valuation.py"),
-            // cache-bust so a fresh daily build is picked up
-            "data.json": file(`data.json?v=${Date.now()}`),
+            "data.json": file("data.json"),
           },
         },
         document.getElementById("root"),
