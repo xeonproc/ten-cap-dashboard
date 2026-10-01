@@ -5,9 +5,152 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
     <title>10-Cap Value Dashboard</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@stlite/browser@1.9.2/build/stlite.css" />
+    <style>
+      html, body { background: #000; }
+
+      /* Falling-character backdrop, behind the app */
+      #rain { position: fixed; inset: 0; z-index: 0; opacity: 0.22; pointer-events: none; }
+      #root { position: relative; z-index: 1; }
+      .stApp, [data-testid="stHeader"] { background: transparent !important; }
+      [data-testid="stSidebar"] { background: rgba(3, 20, 3, 0.9) !important; }
+
+      /* CRT scanlines over everything */
+      #scanlines {
+        position: fixed; inset: 0; z-index: 9000; pointer-events: none;
+        background: repeating-linear-gradient(to bottom, rgba(0, 0, 0, 0) 0 2px, rgba(0, 0, 0, 0.22) 2px 3px);
+      }
+      #scanlines::after {
+        content: ""; position: absolute; left: 0; right: 0; height: 120px;
+        background: linear-gradient(to bottom, rgba(0, 255, 65, 0), rgba(0, 255, 65, 0.05), rgba(0, 255, 65, 0));
+        animation: sweep 7s linear infinite;
+      }
+      @keyframes sweep { from { top: -120px; } to { top: 100%; } }
+
+      /* Blinking cursor after the title; glow on hover */
+      .stApp h1::after { content: "_"; animation: blink 1.1s steps(1) infinite; }
+      @keyframes blink { 50% { opacity: 0; } }
+      [data-testid="stMetric"] { transition: box-shadow 0.2s, transform 0.2s; }
+      [data-testid="stMetric"]:hover { box-shadow: 0 0 14px #00ff41; transform: translateY(-2px); }
+      .stApp button:hover { box-shadow: 0 0 10px #00ff41; }
+
+      /* Boot screen shown while the Python runtime loads */
+      #boot {
+        position: fixed; inset: 0; z-index: 9500; background: #000; color: #00ff41;
+        font: 15px/1.7 "IBM Plex Mono", "Cascadia Mono", Consolas, "Courier New", monospace;
+        padding: 8vh 8vw; transition: opacity 0.6s; white-space: pre-wrap;
+        text-shadow: 0 0 6px #008f11;
+      }
+      #boot.done { opacity: 0; pointer-events: none; }
+      #boot .cursor { animation: blink 0.9s steps(1) infinite; }
+
+      /* Effects switch */
+      #fx {
+        position: fixed; right: 12px; bottom: 10px; z-index: 9600; cursor: pointer;
+        background: #000; color: #00ff41; border: 1px solid #008f11; padding: 3px 8px;
+        font: 12px "IBM Plex Mono", Consolas, "Courier New", monospace;
+      }
+      body.fx-off #rain, body.fx-off #scanlines { display: none; }
+      body.fx-off .stApp h1::after { animation: none; }
+      @media (prefers-reduced-motion: reduce) {
+        #scanlines::after, .stApp h1::after, #boot .cursor { animation: none; }
+      }
+    </style>
   </head>
-  <body style="background: #000">
+  <body>
+    <canvas id="rain"></canvas>
     <div id="root"></div>
+    <div id="scanlines"></div>
+    <div id="boot"></div>
+    <button id="fx" type="button">FX: ON</button>
+
+    <script>
+      // ---- effects switch (remembered per browser)
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      let fxOn = !reducedMotion;
+      try {
+        const saved = localStorage.getItem("fx");
+        if (saved !== null) fxOn = saved === "on";
+      } catch (e) {}
+      const fxButton = document.getElementById("fx");
+      function applyFx() {
+        document.body.classList.toggle("fx-off", !fxOn);
+        fxButton.textContent = "FX: " + (fxOn ? "ON" : "OFF");
+      }
+      fxButton.addEventListener("click", () => {
+        fxOn = !fxOn;
+        try { localStorage.setItem("fx", fxOn ? "on" : "off"); } catch (e) {}
+        applyFx();
+      });
+      applyFx();
+
+      // ---- falling characters
+      const canvas = document.getElementById("rain");
+      const ctx = canvas.getContext("2d");
+      const GLYPHS = "0123456789$%+-.EPSFCFROEPEGTBV10K10Qｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄ";
+      const SIZE = 16;
+      let drops = [];
+      function resize() {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+        drops = Array.from({ length: Math.ceil(canvas.width / SIZE) }, () => Math.random() * -50);
+      }
+      window.addEventListener("resize", resize);
+      resize();
+      let lastFrame = 0;
+      function rain(now) {
+        requestAnimationFrame(rain);
+        if (!fxOn || document.hidden || now - lastFrame < 60) return;
+        lastFrame = now;
+        ctx.fillStyle = "rgba(0, 0, 0, 0.08)";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.font = SIZE + "px monospace";
+        for (let i = 0; i < drops.length; i++) {
+          const y = drops[i] * SIZE;
+          ctx.fillStyle = Math.random() < 0.03 ? "#ccffd8" : "#00ff41";
+          ctx.fillText(GLYPHS[Math.floor(Math.random() * GLYPHS.length)], i * SIZE, y);
+          drops[i] = y > canvas.height && Math.random() > 0.975 ? 0 : drops[i] + 1;
+        }
+      }
+      requestAnimationFrame(rain);
+
+      // ---- boot screen: types status lines until the dashboard has rendered
+      const boot = document.getElementById("boot");
+      const LINES = [
+        "TEN-CAP TERMINAL",
+        "",
+        "> LOADING PYTHON RUNTIME ..........",
+        "> LOADING PANDAS / PLOTLY .........",
+        "> READING SEC EDGAR DATA FILE .....",
+        "> COMPUTING OWNER EARNINGS ........",
+        "> APPLYING STABILITY SCREENS ......",
+        "> RENDERING DASHBOARD .............",
+      ];
+      let line = 0, col = 0, typed = "";
+      const typer = setInterval(() => {
+        if (line < LINES.length) {
+          if (col < LINES[line].length) {
+            typed += LINES[line][col++];
+          } else {
+            typed += "\n";
+            line++;
+            col = 0;
+          }
+        }
+        boot.innerHTML = typed + '<span class="cursor">█</span>';
+      }, 45);
+      const started = Date.now();
+      const ready = setInterval(() => {
+        const rendered = document.querySelector(".stApp h1");
+        if (rendered || Date.now() - started > 90000) {
+          clearInterval(ready);
+          clearInterval(typer);
+          boot.textContent = typed + (rendered ? "\n> READY." : "");
+          boot.classList.add("done");
+          setTimeout(() => boot.remove(), 800);
+        }
+      }, 250);
+    </script>
+
     <script type="module">
       import { mount } from "https://cdn.jsdelivr.net/npm/@stlite/browser@1.9.2/build/stlite.js";
 
