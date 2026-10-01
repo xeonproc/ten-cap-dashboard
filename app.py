@@ -267,9 +267,9 @@ with detail_tab:
         st.caption(
             "EPS is adjusted for stock splits detected in the filings: "
             + ", ".join(
-                f"{s['factor']:g}-for-1 before {s['before']}"
+                f"{s['factor']:.3g}-for-1 before {s['before']}"
                 if s["factor"] >= 1
-                else f"1-for-{1 / s['factor']:g} reverse before {s['before']}"
+                else f"1-for-{1 / s['factor']:.3g} reverse before {s['before']}"
                 for s in company["splits"]
             )
             + "."
