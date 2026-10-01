@@ -6,7 +6,7 @@
     <title>10-Cap Value Dashboard</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@stlite/browser@1.9.2/build/stlite.css" />
   </head>
-  <body>
+  <body style="background: #000">
     <div id="root"></div>
     <script type="module">
       import { mount } from "https://cdn.jsdelivr.net/npm/@stlite/browser@1.9.2/build/stlite.js";
@@ -18,6 +18,15 @@
       mount(
         {
           requirements: ["plotly"],
+          // Green-screen terminal theme (keep in sync with .streamlit/config.toml)
+          streamlitConfig: {
+            "theme.base": "dark",
+            "theme.primaryColor": "#00ff41",
+            "theme.backgroundColor": "#000000",
+            "theme.secondaryBackgroundColor": "#031403",
+            "theme.textColor": "#00ff41",
+            "theme.font": "monospace",
+          },
           entrypoint: "app.py",
           files: {
             "app.py": file("app.py"),

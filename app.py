@@ -14,6 +14,30 @@ st.set_page_config(page_title="10-Cap Value Dashboard", page_icon="📉", layout
 
 MIN_FCF_YEARS = 3  # fewer years of cash-flow data than this and EPS is used instead
 
+# Green-screen terminal palette (base colours are set in index.html / .streamlit/config.toml)
+GREEN, DIM_GREEN, AMBER, RED = "#00ff41", "#008f11", "#ffb000", "#ff5555"
+
+st.markdown(
+    f"""
+    <style>
+    html, body, [class*="st-"], button, input, textarea, select {{
+        font-family: "IBM Plex Mono", "Cascadia Mono", Consolas, "Courier New", monospace !important;
+    }}
+    h1, h2, h3 {{ text-transform: uppercase; letter-spacing: 0.04em; text-shadow: 0 0 6px {DIM_GREEN}; }}
+    h1::before {{ content: "> "; }}
+    [data-testid="stSidebar"] {{ border-right: 1px solid {DIM_GREEN}; }}
+    [data-testid="stMetric"], [data-testid="stExpander"] details, [data-testid="stAlert"] {{
+        border: 1px solid {DIM_GREEN}; border-radius: 0;
+    }}
+    [data-testid="stMetric"] {{ padding: 0.5rem 0.75rem; }}
+    [data-testid="stMetricValue"] {{ text-shadow: 0 0 6px {DIM_GREEN}; }}
+    button, [data-baseweb="select"] > div, [data-baseweb="input"] {{ border-radius: 0 !important; }}
+    pre, code {{ border: 1px solid {DIM_GREEN}; border-radius: 0 !important; color: {GREEN} !important; }}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 
 @st.cache_data
 def load_data():
@@ -209,7 +233,7 @@ st.caption(
     f"with r = {r:.1%} and g = {g:.2%} ({(1 + g) / (r - g):.1f}× earnings). Not investment advice."
 )
 
-screener_tab, detail_tab = st.tabs(["Bargain screener", "Stock drill-down"])
+screener_tab, detail_tab, formulas_tab = st.tabs(["Bargain screener", "Stock drill-down", "Formulas"])
 
 # ---------------------------------------------------------------- screener
 with screener_tab:
@@ -234,7 +258,7 @@ with screener_tab:
     def discount_color(value):
         if pd.isna(value):
             return ""
-        return "color: #15803d; font-weight: 600" if value >= 0 else "color: #b91c1c; font-weight: 600"
+        return f"color: {GREEN}; font-weight: 700" if value >= 0 else f"color: {RED}; font-weight: 700"
 
     money = "${:,.2f}"
     styler = view.style.format(
@@ -332,7 +356,7 @@ with detail_tab:
         name="Diluted EPS",
         x=years,
         y=[h["eps"] for h in history],
-        marker_color="#2563eb",
+        marker_color=GREEN,
         hovertemplate="FY %{x} EPS: $%{y:,.2f}<extra></extra>",
     )
     if any(h["fcf_ps"] is not None for h in history):
@@ -340,13 +364,14 @@ with detail_tab:
             name="Free cash flow / share",
             x=years,
             y=[h["fcf_ps"] for h in history],
-            marker_color="#f59e0b",
+            marker_color=AMBER,
             hovertemplate="FY %{x} FCF/share: $%{y:,.2f}<extra></extra>",
         )
     if row["Owner Earnings"] is not None:
         fig.add_hline(
             y=row["Owner Earnings"],
             line_dash="dash",
+            line_color=GREEN,
             annotation_text=f"Owner earnings used: ${row['Owner Earnings']:,.2f}",
             annotation_position="top left",
         )
@@ -356,9 +381,14 @@ with detail_tab:
         yaxis_title="USD per share",
         xaxis_type="category",
         barmode="group",
+        font=dict(family="IBM Plex Mono, Consolas, Courier New, monospace", color=GREEN),
+        paper_bgcolor="#000000",
+        plot_bgcolor="#000000",
+        xaxis=dict(gridcolor="#0a3d0a", linecolor=DIM_GREEN),
+        yaxis=dict(gridcolor="#0a3d0a", zerolinecolor=DIM_GREEN),
         legend=dict(orientation="h", yanchor="bottom", y=1.0, xanchor="right", x=1),
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, theme=None)
     if company.get("splits"):
         st.caption(
             "Per-share figures are adjusted for stock splits detected in the filings: "
@@ -387,3 +417,221 @@ with detail_tab:
             ).style.format({"Value": "{:,.0f}"}, na_rep="—"),
             hide_index=True,
         )
+
+# ---------------------------------------------------------------- formulas
+with formulas_tab:
+    st.subheader("How every number is calculated")
+    st.write(
+        "Each formula below is followed by a worked example using a real company from the "
+        "data and your current sidebar settings. Change the company or the sliders and the "
+        "examples update."
+    )
+    example_ticker = st.selectbox(
+        "Example company",
+        options,
+        format_func=lambda t: f"{t} — {by_ticker[t]['name']}",
+        key="formula_example",
+    )
+    ex = by_ticker[example_ticker]
+    ex_row = revalue(ex)
+    ex_history = ex["history"][-window:]
+
+    def m(value):
+        """Money, or a dash when missing."""
+        return "n/a" if value is None or pd.isna(value) else f"${value:,.2f}"
+
+    def n(value, fmt="{:,.2f}"):
+        return "n/a" if value is None or pd.isna(value) else fmt.format(value)
+
+    def big(value):
+        return "n/a" if value is None else f"${value / 1e6:,.0f}M"
+
+    def explain(title, formula, meaning, example):
+        st.markdown(f"#### {title}")
+        st.code(formula, language=None)
+        st.write(meaning)
+        st.caption(f"Example: {example_ticker}")
+        st.code(example, language=None)
+
+    st.markdown("### Part 1 — Intrinsic value")
+
+    explain(
+        "1. EPS (earnings per share)",
+        "EPS = net profit for the year / number of shares",
+        "The company's reported accounting profit, per share. We use the 'diluted' figure, "
+        "which counts shares that could be created by stock options. Older years are "
+        "rescaled for stock splits so all years are comparable.",
+        "\n".join(f"FY{h['fiscal_year']}  EPS {m(h['eps'])}" for h in ex_history),
+    )
+
+    explain(
+        "2. Free cash flow per share (FCF/share)",
+        "FCF/share = (operating cash flow - capital expenditure) / number of shares",
+        "Cash the business actually produced, after paying for equipment and buildings "
+        "(capital expenditure, or 'capex'). Profit is an accounting opinion; cash is a fact. "
+        "Not used for financial companies.",
+        "\n".join(f"FY{h['fiscal_year']}  FCF/share {m(h['fcf_ps'])}" for h in ex_history),
+    )
+
+    eps_values = [h["eps"] for h in ex_history]
+    fcf_values = [h["fcf_ps"] for h in ex_history if h["fcf_ps"] is not None]
+    explain(
+        f"3. {window}-year averages",
+        "average = sum of the yearly values / number of years",
+        "One year can be unusually good or bad. Averaging over a full business cycle gives a "
+        "steadier picture of what the company normally earns.",
+        f"Avg EPS       = ({' + '.join(n(v) for v in eps_values)}) / {len(eps_values)} = {m(ex_row['Avg EPS'])}\n"
+        + (
+            f"Avg FCF/share = ({' + '.join(n(v) for v in fcf_values)}) / {len(fcf_values)} = {m(ex_row['Avg FCF/Sh'])}"
+            if ex_row["Avg FCF/Sh"] is not None
+            else "Avg FCF/share = n/a (not used for this company)"
+        ),
+    )
+
+    explain(
+        "4. Owner earnings",
+        "owner earnings = the LOWER of average EPS and average FCF/share",
+        "What an owner could realistically count on per share each year. Taking the lower "
+        "figure means we never pay for profit that did not turn into cash. The sidebar can "
+        f"switch this to EPS only or FCF only. Current setting: {BASES[basis]}.",
+        f"Avg EPS {m(ex_row['Avg EPS'])}   Avg FCF/share {m(ex_row['Avg FCF/Sh'])}\n"
+        f"Owner earnings = {m(ex_row['Owner Earnings'])}",
+    )
+
+    multiple = (1 + g) / (r - g)
+    explain(
+        "5. The multiple",
+        "multiple = (1 + g) / (r - g)",
+        "How many times owner earnings the business is worth. r is the hurdle rate: the "
+        "yearly return you demand. g is the growth rate: how fast you assume earnings grow "
+        "forever. A higher r lowers the multiple; a higher g raises it sharply. With g = 0 "
+        "and r = 10% the multiple is exactly 10, the strict '10-cap'.",
+        f"r = {r:.2%}   g = {g:.2%}\n"
+        f"multiple = (1 + {g:.4f}) / ({r:.4f} - {g:.4f}) = {1 + g:.4f} / {r - g:.4f} = {multiple:.2f}",
+    )
+
+    explain(
+        "6. Intrinsic value",
+        "intrinsic value = owner earnings x multiple",
+        "The estimate of what one share is worth, based on what the business earns. If owner "
+        "earnings are zero or negative there is no intrinsic value.",
+        f"{m(ex_row['Owner Earnings'])} x {multiple:.2f} = {m(ex_row['Intrinsic Value'])}",
+    )
+
+    explain(
+        "7. Discount (margin of safety)",
+        "discount % = (1 - price / intrinsic value) x 100",
+        "Positive means the share costs less than the estimate. The margin of safety is the "
+        "discount you insist on before buying, to allow for the estimate being wrong. The "
+        f"screener currently shows companies at {target}% or more.",
+        f"price {m(ex['price'])}   intrinsic value {m(ex_row['Intrinsic Value'])}\n"
+        + (
+            f"discount = (1 - {ex['price']:,.2f} / {ex_row['Intrinsic Value']:,.2f}) x 100 = {ex_row['Discount %']:+.1f}%\n"
+            f"price needed for a {target}% discount = {m(ex_row['Intrinsic Value'] * (1 - target / 100))}"
+            if ex_row["Intrinsic Value"]
+            else "discount = n/a"
+        ),
+    )
+
+    st.markdown("### Part 2 — Asset anchor")
+
+    explain(
+        "8. Tangible book value per share (TBV/share) and Price/TBV",
+        "TBV/share = (assets - liabilities - goodwill - intangibles) / shares\n"
+        "Price/TBV = price / TBV per share",
+        "What the company owns minus what it owes, ignoring things you cannot sell separately "
+        "such as brand value (goodwill and intangibles). A floor-style measure: useful for "
+        "asset-heavy businesses, less so for software or brands.",
+        f"assets {big(ex.get('assets'))} - liabilities {big(ex.get('liabilities'))} "
+        f"- goodwill {big(ex.get('goodwill'))} - intangibles {big(ex.get('intangibles'))}\n"
+        f"divided by {n(ex.get('shares_outstanding'), '{:,.0f}')} shares = {m(ex.get('tbv_per_share'))}\n"
+        f"Price/TBV = {m(ex['price'])} / {m(ex.get('tbv_per_share'))} = {n(ex.get('price_to_tbv'), '{:.1f}')}",
+    )
+
+    st.markdown("### Part 3 — Stability filters")
+
+    explain(
+        "9. Loss years",
+        "loss years = number of years with EPS below zero",
+        "A business that loses money in bad years is cyclical or fragile.",
+        f"{ex.get('loss_years')} of {len(ex['history'])} years",
+    )
+    explain(
+        "10. EPS volatility",
+        "volatility = standard deviation of yearly EPS / average EPS",
+        "How much earnings jump around relative to their average. Steady earners are below "
+        "about 0.5; boom-and-bust businesses are well above 1.",
+        f"volatility = {n(ex.get('eps_volatility'))}",
+    )
+    explain(
+        "11. Current EPS vs long-run average",
+        "ratio = EPS over the last 12 months (TTM) / 10-year average EPS",
+        "TTM means 'trailing twelve months'. A high ratio means today's earnings are far above "
+        "the company's own history: either real growth or a cyclical peak.",
+        f"{m(ex.get('ttm_eps'))} / {m(valuation.average([h['eps'] for h in ex['history']]))} = {n(ex.get('ttm_to_avg'))}",
+    )
+    explain(
+        "12. Capex as a share of operating cash flow",
+        "capex / OCF = total capital expenditure / total operating cash flow",
+        "OCF is operating cash flow. A high share means the business must keep reinvesting "
+        "heavily just to keep going (shipping, mining, energy).",
+        f"capex / OCF = {n(pct(ex.get('capex_to_ocf')), '{:.0f}%')}",
+    )
+    explain(
+        "13. Revenue growth",
+        "growth per year = (last year's revenue / first year's revenue) ^ (1 / years between) - 1",
+        "Compound annual growth in sales over the history. Negative means the business is shrinking.",
+        f"revenue growth = {n(pct(ex.get('revenue_growth')), '{:+.1f}%')} per year",
+    )
+
+    st.markdown("### Part 4 — Quality filters (Buffett screen)")
+
+    last5 = [h["eps"] for h in ex["history"][-5:]]
+    explain(
+        "14. P/E (price to earnings)",
+        "P/E = price / EPS over the last 12 months",
+        "How many years of current profit you pay for the share.",
+        f"{m(ex['price'])} / {m(ex.get('ttm_eps'))} = {n(ex.get('pe'), '{:.1f}')}",
+    )
+    explain(
+        "15. EPS growth, past 5 years",
+        "growth per year = (latest EPS / EPS four years earlier) ^ (1 / 4) - 1",
+        "Compound annual growth in EPS. Cannot be computed if either end is zero or negative. "
+        "Note: Finviz uses analysts' forecasts of future growth; this uses actual past growth.",
+        f"({m(last5[-1])} / {m(last5[0])}) ^ (1 / {len(last5) - 1}) - 1 = {n(pct(ex.get('eps_growth')), '{:+.1f}%')} per year",
+    )
+    explain(
+        "16. PEG (price/earnings to growth)",
+        "PEG = P/E / EPS growth in percent",
+        "P/E adjusted for growth. A fast grower deserves a higher P/E; PEG under 1 to 2 is "
+        "the usual range for 'reasonably priced for its growth'.",
+        f"{n(ex.get('pe'), '{:.1f}')} / {n(pct(ex.get('eps_growth')), '{:.1f}')} = {n(ex.get('peg'))}",
+    )
+    explain(
+        "17. ROE (return on equity)",
+        "ROE = net profit over the last 12 months / shareholders' equity",
+        "Profit as a percentage of the owners' money in the business. Consistently high ROE "
+        "suggests a competitive advantage.",
+        f"ROE = {n(pct(ex.get('roe')), '{:.1f}%')}",
+    )
+    explain(
+        "18. Current ratio",
+        "current ratio = current assets / current liabilities",
+        "Short-term assets (cash, stock, money owed to it) against bills due within a year. "
+        "Above 1.5 means bills are comfortably covered. Banks do not report this.",
+        f"current ratio = {n(ex.get('current_ratio'))}",
+    )
+    explain(
+        "19. Debt / equity",
+        "debt / equity = total borrowings / shareholders' equity",
+        "How much the company has borrowed relative to the owners' money. Lower is safer. "
+        "Approximate: companies label debt inconsistently in their filings.",
+        f"debt / equity = {n(ex.get('debt_to_equity'))}",
+    )
+    explain(
+        "20. Operating margin",
+        "operating margin = operating profit over the last 12 months / revenue",
+        "Profit from the core business as a percentage of sales, before interest and tax. "
+        "High margins suggest pricing power.",
+        f"operating margin = {n(pct(ex.get('operating_margin')), '{:.1f}%')}",
+    )
