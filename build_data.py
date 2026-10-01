@@ -1,67 +1,109 @@
-"""Pre-compute valuation data for every ticker in tickers.txt and write dist/data.json.
+"""Screen the whole U.S. market, value the survivors, and write dist/data.json.
 
-Runs in GitHub Actions so the browser never has to call SEC or Yahoo (no CORS issues).
+Phase 1 (a handful of bulk requests) narrows every listed stock to profitable candidates.
+Phase 2 (one SEC request per candidate) pulls full fundamentals and computes valuations.
+
+Runs in GitHub Actions so the browser never has to call the data sources (no CORS issues).
 """
 
 import json
+import os
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-import requests
-
+import market_data
 import sec_data
 import valuation
 
-ROOT = Path(__file__).parent
-TICKERS_FILE = ROOT / "tickers.txt"
-OUTPUT = ROOT / "dist" / "data.json"
+OUTPUT = Path(__file__).parent / "dist" / "data.json"
 
-YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
-YAHOO_HEADERS = {"User-Agent": "Mozilla/5.0"}
+# Phase 1 thresholds
+MAJOR_EXCHANGES = {"NYSE", "Nasdaq"}  # SEC labels NYSE American (AMEX) listings as NYSE
+MIN_MARKET_CAP = 100_000_000
+MAX_EPS_AGE_DAYS = 550  # ignore companies whose latest annual report is ~18+ months old
 
+# Phase 2 thresholds
+MIN_EPS_YEARS = 3  # need at least this many fiscal years to normalize earnings
+MIN_PLAUSIBLE_PE = 1  # below this the EPS is almost certainly per a different share class
 
-def load_tickers():
-    lines = TICKERS_FILE.read_text().splitlines()
-    return [ln.split("#")[0].strip().upper() for ln in lines if ln.split("#")[0].strip()]
-
-
-def fetch_price(ticker):
-    """Latest market price from Yahoo Finance, or None if unavailable."""
-    try:
-        resp = requests.get(
-            YAHOO_CHART_URL.format(ticker=ticker.replace(".", "-")),
-            headers=YAHOO_HEADERS,
-            params={"range": "1d", "interval": "1d"},
-            timeout=20,
-        )
-        resp.raise_for_status()
-        return resp.json()["chart"]["result"][0]["meta"]["regularMarketPrice"]
-    except Exception as exc:
-        print(f"  ! price lookup failed for {ticker}: {exc}", file=sys.stderr)
-        return None
+# Optional cap on candidates, for quick test builds.
+CANDIDATE_LIMIT = int(os.environ.get("CANDIDATE_LIMIT") or 0)
 
 
-def build_company(ticker, info):
-    facts = sec_data.fetch_company_facts(info["cik"])
-    eps = sec_data.eps_history(facts)
-    if not eps:
-        raise ValueError("no annual diluted EPS reported")
+def select_candidates():
+    """Phase 1: return (candidates, funnel) where funnel counts survivors of each filter."""
+    universe = sec_data.load_universe()
+    listings = market_data.fetch_listings()
+    annual_eps = sec_data.latest_annual_eps_by_cik()
+    oldest_eps = (date.today() - timedelta(days=MAX_EPS_AGE_DAYS)).isoformat()
+
+    funnel = {"sec_registrant_tickers": len(universe), "listed_common_stocks": len(listings)}
+    on_exchange, sized, profitable = [], {}, []
+
+    for listing in listings:
+        info = universe.get(listing["ticker"].upper())
+        if info and info["exchange"] in MAJOR_EXCHANGES:
+            on_exchange.append({**listing, **info, "name": info["name"]})
+    funnel["on_major_exchange_with_sec_filings"] = len(on_exchange)
+
+    for stock in on_exchange:
+        if not (stock["price"] and stock["price"] > 0):
+            continue
+        if not (stock["market_cap"] and stock["market_cap"] > MIN_MARKET_CAP):
+            continue
+        # One row per company: keep the largest share class.
+        kept = sized.get(stock["cik"])
+        if kept is None or stock["market_cap"] > kept["market_cap"]:
+            sized[stock["cik"]] = stock
+    funnel["price_and_market_cap_ok"] = len(sized)
+
+    for stock in sized.values():
+        eps = annual_eps.get(stock["cik"])
+        if eps and eps["eps"] > 0 and eps["end"] >= oldest_eps:
+            profitable.append(stock)
+    funnel["positive_latest_annual_eps"] = len(profitable)
+
+    profitable.sort(key=lambda s: s["market_cap"], reverse=True)
+    if CANDIDATE_LIMIT:
+        profitable = profitable[:CANDIDATE_LIMIT]
+    return profitable, funnel
+
+
+def build_company(stock):
+    """Phase 2: full fundamentals and valuation for one candidate."""
+    facts = sec_data.fetch_company_facts(stock["cik"])
+    tag = sec_data.eps_tag(facts)
+    if tag is None:
+        raise ValueError("no annual EPS reported")
+    eps = sec_data.eps_history(facts, tag)
+    if len(eps) < MIN_EPS_YEARS:
+        raise ValueError(f"only {len(eps)} fiscal years of EPS")
+    ttm = sec_data.ttm_eps(facts, tag)
+    if ttm is None or ttm <= 0:
+        raise ValueError("TTM EPS is not positive")
+    if stock["price"] / ttm < MIN_PLAUSIBLE_PE:
+        raise ValueError("implausible EPS relative to price (multiple share classes?)")
+
     bs = sec_data.balance_sheet(facts) or {}
     shares = sec_data.diluted_shares(facts)
-    price = fetch_price(ticker)
-
     norm_eps = valuation.normalized_eps([row["value"] for row in eps])
     iv = valuation.intrinsic_value(norm_eps)
     return {
-        "ticker": ticker,
-        "name": info["name"],
-        "cik": info["cik"],
-        "price": price,
+        "ticker": stock["ticker"],
+        "name": stock["name"],
+        "cik": stock["cik"],
+        "exchange": stock["exchange"],
+        "sector": stock["sector"],
+        "industry": stock["industry"],
+        "price": stock["price"],
+        "market_cap": stock["market_cap"],
+        "eps_basis": "diluted" if tag == sec_data.EPS_TAGS[0] else "basic",
         "eps_history": [{"fiscal_year": r["fiscal_year"], "eps": r["value"]} for r in eps],
+        "ttm_eps": ttm,
         "normalized_eps": norm_eps,
         "intrinsic_value": iv,
-        "discount_pct": valuation.discount_pct(price, iv),
+        "discount_pct": valuation.discount_pct(stock["price"], iv),
         "tbv_per_share": valuation.tbv_per_share(
             bs.get("assets"), bs.get("liabilities"), bs.get("goodwill"), bs.get("intangibles"), shares
         ),
@@ -75,21 +117,20 @@ def build_company(ticker, info):
 
 
 def main():
-    tickers = load_tickers()
-    cik_map = sec_data.load_cik_map()
-    companies, errors = [], []
+    candidates, funnel = select_candidates()
+    for step, count in funnel.items():
+        print(f"{step}: {count}")
+    print(f"Phase 2: analysing {len(candidates)} candidates")
 
-    for ticker in tickers:
-        print(f"{ticker} ...")
-        info = cik_map.get(ticker)
-        if info is None:
-            errors.append({"ticker": ticker, "error": "ticker not found in SEC registry"})
-            continue
+    companies, errors = [], []
+    for i, stock in enumerate(candidates, 1):
         try:
-            companies.append(build_company(ticker, info))
+            companies.append(build_company(stock))
         except Exception as exc:
-            print(f"  ! {ticker}: {exc}", file=sys.stderr)
-            errors.append({"ticker": ticker, "error": str(exc)})
+            errors.append({"ticker": stock["ticker"], "error": str(exc)})
+        if i % 100 == 0:
+            print(f"  {i}/{len(candidates)} ({len(companies)} valued, {len(errors)} dropped)")
+    funnel["valued"] = len(companies)
 
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     OUTPUT.write_text(
@@ -100,13 +141,13 @@ def main():
                     "hurdle_rate": valuation.DEFAULT_HURDLE_RATE,
                     "growth_rate": valuation.DEFAULT_GROWTH_RATE,
                 },
+                "funnel": funnel,
                 "companies": companies,
                 "errors": errors,
-            },
-            indent=2,
+            }
         )
     )
-    print(f"Wrote {OUTPUT} ({len(companies)} companies, {len(errors)} errors)")
+    print(f"Wrote {OUTPUT} ({len(companies)} companies, {len(errors)} dropped)")
     if not companies:
         sys.exit("No companies were built; failing so stale data is not replaced with nothing.")
 

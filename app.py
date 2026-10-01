@@ -38,7 +38,22 @@ g = st.sidebar.slider(
     "Growth rate (g) %", 0.0, 8.0, defaults.get("growth_rate", 0.03) * 100, 0.25
 ) / 100
 target = st.sidebar.slider("Target discount (margin of safety) %", 0, 90, 30, 5)
+sectors = sorted({c.get("sector") for c in companies if c.get("sector")})
+chosen_sectors = st.sidebar.multiselect("Sectors", sectors, placeholder="All sectors")
 st.sidebar.caption(f"Data built {data.get('generated_at', 'unknown')} from SEC EDGAR filings.")
+
+FUNNEL_LABELS = {
+    "sec_registrant_tickers": "Tickers registered with the SEC",
+    "listed_common_stocks": "Common stocks on NYSE / NASDAQ / AMEX",
+    "on_major_exchange_with_sec_filings": "…matched to SEC filings",
+    "price_and_market_cap_ok": "…with market cap > $100M",
+    "positive_latest_annual_eps": "…profitable in latest fiscal year",
+    "valued": "…valued (positive TTM EPS, 3+ years of data)",
+}
+if data.get("funnel"):
+    with st.sidebar.expander("How the universe was screened", expanded=True):
+        for key, count in data["funnel"].items():
+            st.write(f"{FUNNEL_LABELS.get(key, key)}: **{count:,}**")
 
 if r <= g:
     st.error("Hurdle rate must be greater than growth rate.")
@@ -51,7 +66,10 @@ def revalue(company):
     return {
         "Ticker": company["ticker"],
         "Company": company["name"],
+        "Sector": company.get("sector"),
+        "Mkt Cap ($M)": (company.get("market_cap") or 0) / 1e6 or None,
         "Price": company["price"],
+        "TTM EPS": company.get("ttm_eps"),
         "Normalized EPS": company["normalized_eps"],
         "Intrinsic Value": iv,
         "TBV / Share": company["tbv_per_share"],
@@ -60,6 +78,8 @@ def revalue(company):
 
 
 table = pd.DataFrame([revalue(c) for c in companies])
+if chosen_sectors:
+    table = table[table["Sector"].isin(chosen_sectors)]
 
 st.title("10-Cap Value Investing Dashboard")
 st.caption(
@@ -80,7 +100,7 @@ with screener_tab:
     if view.empty and table["Discount %"].notna().any():
         best = table.loc[table["Discount %"].idxmax()]
         st.info(
-            f"All {len(table)} companies loaded, but none trade at a ≥ {target}% discount. "
+            f"{len(table)} companies loaded, but none trade at a ≥ {target}% discount. "
             f"The closest is {best['Ticker']} at {best['Discount %']:+.1f}%. "
             "Lower the target discount in the sidebar, or tick “Show all companies”."
         )
@@ -94,6 +114,8 @@ with screener_tab:
     styler = view.style.format(
         {
             "Price": money,
+            "Mkt Cap ($M)": "{:,.0f}",
+            "TTM EPS": money,
             "Normalized EPS": money,
             "Intrinsic Value": money,
             "TBV / Share": money,
@@ -113,7 +135,7 @@ with screener_tab:
     )
 
     if data.get("errors"):
-        with st.expander(f"{len(data['errors'])} tickers could not be processed"):
+        with st.expander(f"{len(data['errors'])} candidates dropped during analysis"):
             st.dataframe(pd.DataFrame(data["errors"]), hide_index=True)
 
 # ---------------------------------------------------------------- drill-down
