@@ -10,7 +10,7 @@ Streamlit app (running in the browser via [stlite](https://github.com/whitphx/st
 | `build_data.py` | Fast step: computes everything from the cache and writes `dist/data.json` |
 | `sec_tags.py` | The list of SEC fields that are downloaded and may be read |
 | `sec_data.py` | SEC EDGAR client and extractors (EPS, cash flow, balance sheet, split detection) |
-| `market_data.py` | Bulk price / market-cap snapshot of all NYSE, NASDAQ and AMEX listings |
+| `market_data.py` | Bulk price / market-cap snapshot of all NYSE, NASDAQ and AMEX listings; exchange rates |
 | `valuation.py` | Formulas, shared by the build and the browser app |
 | `app.py` / `index.html` | Streamlit dashboard and its stlite host page |
 | `.github/workflows/deploy.yml` | Builds and deploys to Pages |
@@ -35,6 +35,18 @@ Streamlit app (running in the browser via [stlite](https://github.com/whitphx/st
    are dropped (see "candidates dropped" on the dashboard).
 3. **Dashboard:** intrinsic value and discount are recomputed in the browser from the
    sidebar settings, then filtered.
+
+## US and foreign modes
+
+The dashboard has a market switch.
+
+- **US companies** are valued from per-share figures in their filings (US GAAP, dollars),
+  adjusted for stock splits, with trailing-twelve-month earnings from quarterly reports.
+- **Foreign companies listed in the US** (usually as depositary shares) report in their own
+  currency, often under IFRS. Their whole-company figures are converted to dollars at each
+  fiscal year's average exchange rate and divided by the number of US-listed shares
+  (market cap / price), which avoids needing the depositary-share ratio. They are not
+  pre-filtered for profit, have annual figures only, and may lag by up to about two years.
 
 ## Valuation
 
@@ -77,7 +89,9 @@ streamlit run app.py
   earlier periods, so a split in the last few months may not be adjusted yet.
 - Maintenance capex is not disclosed, so free cash flow subtracts all capex. This understates
   owner earnings for companies investing heavily in growth.
-- Companies filing under IFRS (most foreign issuers) have no `us-gaap` facts and are skipped.
+- Foreign figures depend on the listing source's market cap being for the whole company and on
+  monthly exchange rates from Yahoo Finance; currency moves appear as earnings volatility.
+- Some foreign companies file no machine-readable figures with the SEC and cannot be valued.
 - Companies tag debt and revenue inconsistently; debt/equity and operating margin are approximate.
 - Prices and market caps come from Nasdaq's unofficial screener endpoint; if it fails the
   build fails and the previous deployment stays up.
