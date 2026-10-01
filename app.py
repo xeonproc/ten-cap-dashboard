@@ -52,10 +52,24 @@ if data is None:
     st.error("data.json not found. Run `python fetch_data.py` then `python build_data.py`.")
     st.stop()
 
-companies = data["companies"]
 defaults = data.get("defaults", {})
 
 # ---------------------------------------------------------------- sidebar
+MODES = {"us": "US companies", "foreign": "Foreign companies (US-listed)"}
+mode = st.sidebar.radio(
+    "Market",
+    list(MODES),
+    format_func=MODES.get,
+    help="Foreign mode covers companies based outside the US that trade on NYSE or NASDAQ, "
+    "usually as depositary shares. Their accounts are converted to US dollars and are "
+    "less precise than the US figures; see the Formulas tab.",
+)
+foreign_mode = mode == "foreign"
+companies = [c for c in data["companies"] if bool(c.get("foreign")) == foreign_mode]
+if not companies:
+    st.warning("No companies are available for this market in the current data.")
+    st.stop()
+
 st.sidebar.header("Valuation")
 r = st.sidebar.slider(
     "Hurdle rate (r) %", 5.0, 20.0, defaults.get("hurdle_rate", 0.10) * 100, 0.5
@@ -141,8 +155,11 @@ FUNNEL_LABELS = {
     "listed_common_stocks": "Common stocks on NYSE / NASDAQ / AMEX",
     "on_major_exchange_with_sec_filings": "…matched to SEC filings",
     "price_and_market_cap_ok": "…with market cap > $100M",
-    "positive_latest_annual_eps": "…profitable in latest fiscal year",
-    "valued": "…valued (positive TTM EPS, 3+ years of data)",
+    "us_over_100m": "US companies",
+    "foreign_over_100m": "Foreign companies",
+    "us_profitable_latest_year": "US companies profitable in latest fiscal year",
+    "valued_us": "US companies valued",
+    "valued_foreign": "Foreign companies valued",
 }
 if data.get("funnel"):
     with st.sidebar.expander("How the universe was screened", expanded=False):
@@ -176,6 +193,7 @@ def revalue(company):
         "Ticker": company["ticker"],
         "Company": company["name"],
         "Sector": company.get("sector"),
+        **({"Country": company.get("country"), "Reports In": company.get("currency")} if foreign_mode else {}),
         "Mkt Cap ($M)": (company.get("market_cap") or 0) / 1e6 or None,
         "Price": company["price"],
         "Intrinsic Value": iv,
@@ -232,6 +250,14 @@ st.caption(
     f"Intrinsic value = {window}-year average owner earnings × (1 + g) / (r − g), "
     f"with r = {r:.1%} and g = {g:.2%} ({(1 + g) / (r - g):.1f}× earnings). Not investment advice."
 )
+if foreign_mode:
+    st.info(
+        "FOREIGN MODE. Figures come from each company's annual report in its own currency, "
+        "converted to US dollars at each year's average exchange rate and divided by the number "
+        "of US-listed shares. 'TTM EPS' is the latest full fiscal year, since foreign companies "
+        "rarely file machine-readable quarterly figures. Currency swings show up as earnings "
+        "volatility. Treat these numbers as a first pass and check the company's own report."
+    )
 
 screener_tab, detail_tab, formulas_tab = st.tabs(["Bargain screener", "Stock drill-down", "Formulas"])
 
@@ -298,9 +324,14 @@ with screener_tab:
         mime="text/csv",
     )
 
-    if data.get("errors"):
-        with st.expander(f"{len(data['errors'])} candidates dropped during analysis"):
-            st.dataframe(pd.DataFrame(data["errors"]), hide_index=True)
+    dropped = [
+        {"ticker": e["ticker"], "reason": e["error"]}
+        for e in data.get("errors", [])
+        if bool(e.get("foreign")) == foreign_mode
+    ]
+    if dropped:
+        with st.expander(f"{len(dropped)} candidates dropped during analysis"):
+            st.dataframe(pd.DataFrame(dropped), hide_index=True)
 
 # ---------------------------------------------------------------- drill-down
 with detail_tab:
@@ -389,6 +420,18 @@ with detail_tab:
         legend=dict(orientation="h", yanchor="bottom", y=1.0, xanchor="right", x=1),
     )
     st.plotly_chart(fig, use_container_width=True, theme=None)
+    if company.get("foreign"):
+        ratio = company.get("shares_per_listed_share")
+        st.caption(
+            f"{company.get('country') or 'Foreign'} company reporting in {company.get('currency')} "
+            f"under {company.get('accounting')}; latest fiscal year ended {company.get('fiscal_year_end')}. "
+            + (
+                f"The filings imply one US-listed share represents about {ratio:g} ordinary share(s); "
+                "if that is not a round number, the market cap or share data may be off."
+                if ratio
+                else "The share ratio could not be cross-checked from the filings."
+            )
+        )
     if company.get("splits"):
         st.caption(
             "Per-share figures are adjusted for stock splits detected in the filings: "
@@ -452,6 +495,37 @@ with formulas_tab:
         st.write(meaning)
         st.caption(f"Example: {example_ticker}")
         st.code(example, language=None)
+
+    if foreign_mode:
+        st.markdown("### Part 0 — How foreign companies are converted")
+        st.code(
+            "per-share figure = company total in its own currency
+"
+            "                   x average USD exchange rate for that fiscal year
+"
+            "                   / number of US-listed shares
+"
+            "number of US-listed shares = market cap / share price",
+            language=None,
+        )
+        st.write(
+            "Foreign companies report whole-company totals in their home currency, often under "
+            "IFRS (International Financial Reporting Standards) instead of US GAAP (the US "
+            "rules). Their US listing is usually a depositary share (ADS or ADR): a US-traded "
+            "certificate standing for some number of ordinary shares. Dividing dollar totals by "
+            "the number of US-listed shares gives per-share figures without needing that ratio. "
+            "'EPS' below therefore means profit attributable to shareholders per US-listed share. "
+            "Balance-sheet figures use the exchange rate at the balance-sheet date."
+        )
+        st.caption(f"Example: {example_ticker}")
+        st.code(
+            f"reports in {ex.get('currency')} under {ex.get('accounting')}
+"
+            f"US-listed shares = {big(ex.get('market_cap'))} / {m(ex['price'])} = {n(ex.get('shares_outstanding'), '{:,.0f}')}
+"
+            f"implied ordinary shares per US-listed share = {n(ex.get('shares_per_listed_share'), '{:g}')}",
+            language=None,
+        )
 
     st.markdown("### Part 1 — Intrinsic value")
 

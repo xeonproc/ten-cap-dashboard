@@ -1,9 +1,13 @@
 """Slow step, run once a day: screen the listed market and download raw SEC figures.
 
-Phase 1 (a handful of bulk requests) narrows every listed stock to profitable candidates.
+Phase 1 (a handful of bulk requests) picks the candidates:
+  - US companies: on a major exchange, over $100M, profitable in the latest fiscal year.
+  - Foreign companies listed in the US: on a major exchange and over $100M. (There is no
+    bulk profit figure for them, so profitability is checked later.)
 Phase 2 (one SEC request per candidate) downloads each candidate's company facts and saves a
-trimmed copy to cache/raw.jsonl.gz. build_data.py then computes everything from that file,
-so changes to the calculations do not need another download.
+trimmed copy to cache/raw.jsonl.gz, followed by exchange rates for every currency seen.
+build_data.py then computes everything from that file, so changes to the calculations do not
+need another download.
 """
 
 import gzip
@@ -15,7 +19,7 @@ from pathlib import Path
 
 import market_data
 import sec_data
-from sec_tags import KEEP_TAGS, KEEP_UNITS
+from sec_tags import KEEP_TAGS
 
 CACHE = Path(__file__).parent / "cache" / "raw.jsonl.gz"
 
@@ -40,7 +44,7 @@ def select_candidates():
     oldest_eps = (date.today() - timedelta(days=MAX_EPS_AGE_DAYS)).isoformat()
 
     funnel = {"sec_registrant_tickers": len(universe), "listed_common_stocks": len(listings)}
-    on_exchange, sized, profitable = [], {}, []
+    on_exchange, sized, candidates = [], {}, []
 
     for listing in listings:
         info = universe.get(listing["ticker"].upper())
@@ -58,30 +62,41 @@ def select_candidates():
         if kept is None or stock["market_cap"] > kept["market_cap"]:
             sized[stock["cik"]] = stock
     funnel["price_and_market_cap_ok"] = len(sized)
+    funnel["us_over_100m"] = sum(1 for s in sized.values() if not s["foreign"])
+    funnel["foreign_over_100m"] = sum(1 for s in sized.values() if s["foreign"])
 
     for stock in sized.values():
+        if stock["foreign"]:
+            candidates.append(stock)
+            continue
         eps = annual_eps.get(stock["cik"])
         if eps and eps["eps"] > 0 and eps["end"] >= oldest_eps:
-            profitable.append(stock)
-    funnel["positive_latest_annual_eps"] = len(profitable)
+            candidates.append(stock)
+    funnel["us_profitable_latest_year"] = sum(1 for s in candidates if not s["foreign"])
 
-    profitable.sort(key=lambda s: s["market_cap"], reverse=True)
+    candidates.sort(key=lambda s: s["market_cap"], reverse=True)
     if CANDIDATE_LIMIT:
-        profitable = profitable[:CANDIDATE_LIMIT]
-    return profitable, funnel
+        candidates = candidates[:CANDIDATE_LIMIT]
+    return candidates, funnel
 
 
-def trim(facts):
-    """Keep only the tags, units, fields and years the calculations use."""
+def trim(raw_facts):
+    """Keep only the taxonomy, currency, tags, fields and years the calculations use."""
+    context = sec_data.detect_context(raw_facts)
+    if context is None:
+        return {"taxonomy": None, "currency": None, "facts": {}}
+    taxonomy, currency = context
+    units_wanted = {currency, f"{currency}/shares", "shares"}
+
     today = date.today()
     duration_cutoff = date(today.year - DURATION_YEARS, today.month, 1).isoformat()
     instant_cutoff = date(today.year - BALANCE_SHEET_YEARS, today.month, 1).isoformat()
-    gaap = facts.get("facts", {}).get("us-gaap", {})
+    source = raw_facts.get("facts", {}).get(taxonomy, {})
     kept_tags = {}
-    for tag in KEEP_TAGS:
+    for tag in KEEP_TAGS[taxonomy]:
         kept_units = {}
-        for unit, rows in gaap.get(tag, {}).get("units", {}).items():
-            if unit not in KEEP_UNITS:
+        for unit, rows in source.get(tag, {}).get("units", {}).items():
+            if unit not in units_wanted:
                 continue
             slim = [
                 {field: row[field] for field in ROW_FIELDS if field in row}
@@ -92,7 +107,7 @@ def trim(facts):
                 kept_units[unit] = slim
         if kept_units:
             kept_tags[tag] = {"units": kept_units}
-    return {"facts": {"us-gaap": kept_tags}}
+    return {"taxonomy": taxonomy, "currency": currency, "facts": {taxonomy: kept_tags}}
 
 
 def main():
@@ -103,6 +118,7 @@ def main():
 
     CACHE.parent.mkdir(parents=True, exist_ok=True)
     saved = failed = 0
+    currencies = set()
     with gzip.open(CACHE, "wt", encoding="utf-8") as out:
         header = {
             "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -114,11 +130,21 @@ def main():
                 facts = trim(sec_data.fetch_company_facts(stock["cik"]))
                 out.write(json.dumps({"stock": stock, "facts": facts}) + "\n")
                 saved += 1
+                if facts["currency"]:
+                    currencies.add(facts["currency"])
             except Exception as exc:
                 failed += 1
+                # Foreign companies that file no machine-readable figures still get a row,
+                # so the dashboard can say why they are missing.
+                out.write(json.dumps({"stock": stock, "facts": None, "error": str(exc)}) + "\n")
                 print(f"  ! {stock['ticker']}: {exc}", file=sys.stderr)
             if i % 100 == 0:
                 print(f"  {i}/{len(candidates)}")
+
+        currencies.discard("USD")
+        print(f"Fetching exchange rates for {len(currencies)} currencies: {sorted(currencies)}")
+        rates = {currency: market_data.fetch_exchange_rates(currency) for currency in sorted(currencies)}
+        out.write(json.dumps({"exchange_rates": rates}) + "\n")
 
     print(f"Wrote {CACHE} ({saved} companies, {failed} failed, {CACHE.stat().st_size / 1e6:.1f} MB)")
     if not saved:
